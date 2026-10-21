@@ -3,9 +3,6 @@
 Windows 7–style WinForms app that copies missing or changed files from folder A to folder B. Optional two-way copy.
 
 A built copy is [`Folder.Difference.Copy.exe`](https://github.com/oiuy-retro/folder-difference-copy/releases/latest/download/Folder.Difference.Copy.exe) on the [latest release](https://github.com/oiuy-retro/folder-difference-copy/releases/latest). It is a single file. The installed [.NET Framework 4](https://dotnet.microsoft.com/download/dotnet-framework/net40) is required (no extra `.config` next to the exe).
-```
-sha256: 27a3769df8722d4106d2f68d5d6437ffe4787fd81f7d94622c4eb2a7f32234b8
-```
 
 ## What it does
 
