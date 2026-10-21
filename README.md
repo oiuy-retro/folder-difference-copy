@@ -2,16 +2,17 @@
 
 Windows 7–style WinForms app that copies missing or changed files from folder A to folder B. Optional two-way copy.
 
-A built copy is [`Folder.Difference.Copy.exe`](https://github.com/oiuy-retro/folder-difference-copy/releases/latest/download/Folder.Difference.Copy.exe) on the [latest release](https://github.com/oiuy-retro/folder-difference-copy/releases/latest). It is a single file. The installed [.NET Framework 4](https://dotnet.microsoft.com/download/dotnet-framework/net40) is required (no extra `.config` next to the exe).
+A built copy is [`Folder.Difference.Copy.exe`](https://github.com/oiuy-retro/folder-difference-copy/releases/latest/download/Folder.Difference.Copy.exe) on the [latest release](https://github.com/oiuy-retro/folder-difference-copy/releases/latest).
 
 ## What it does
 
-- One-way (default): copy files that are missing in B, and replace a same-named file when size or modified time differs. Files that exist only in B stay.
+- One-way, A to B (default): copies files from A that are missing in B, and replaces a same-named file in B when its size or modified time differs. Files that exist only in B stay.
 - **Copy both ways:** missing files go A → B and B → A. Same-named files that differ use the newer write time; A wins a tie. Empty folders are created on both sides.
 - Refuses folders that contain each other.
-- Parallelization 1–32 (default 1). Each file is one copy stream. Finished rows leave the remaining list immediately.
-- Drive profiles (hard drive vs SSD) set folder order or large-beside-small interleaving.
-- Start-at waits until a date and time. Stop cancels the wait. A time that has already passed is refused.
+- Parallelization sets how many files are copied at the same time, from 1 to 32.
+- Copy order can be folder order, smallest first, largest first, or large beside small, where each large file is copied alongside small ones.
+- Drive profiles set the parallelization and copy order to suit the drives you're copying between, such as hard drive to solid-state drive or the same solid-state drive.
+- Start at schedules the copy to begin at a chosen future date and time. Stop cancels the scheduled copy.
 - Long paths (`\\?\`) are enabled.
 - Cancel removes leftover `.fdc-partial` files.
 
