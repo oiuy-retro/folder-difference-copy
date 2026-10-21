@@ -1,0 +1,6 @@
+FolderDiffCopy.exe
+selftest.log
+dist/*.log
+*.pdb
+.idea/
+.vscode/
