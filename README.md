@@ -16,8 +16,6 @@ A built copy is [`Folder.Difference.Copy.exe`](https://github.com/oiuy-retro/fol
 - Long paths (`\\?\`) are enabled.
 - Cancel removes leftover `.fdc-partial` files.
 
-The window uses Segoe UI, Aero-style chrome, glossy progress, and the Explorer folder picker. Profiles live in the app; the preset control is labeled Profile.
-
 ## Run
 
 Start `Folder Difference Copy.exe` on Windows 7 or later with [.NET Framework 4.0+](https://dotnet.microsoft.com/download/dotnet-framework/net40).
