@@ -72,6 +72,10 @@ namespace FolderDiffCopy
                 failed += Check(log, "copy both ways", delegate { TestBothWays(root); });
                 failed += Check(log, "copy both ways preview", delegate { TestBothWaysPreview(root); });
                 failed += Check(log, "copy both ways option", delegate { TestBothWaysOption(); });
+                failed += Check(log, "phone profiles lock parallelization", delegate { TestPhoneProfiles(); });
+                failed += Check(log, "phone compare by size", delegate { TestPhonePlan(); });
+                failed += Check(log, "phone folder names", delegate { TestPhoneNames(); });
+                failed += Check(log, "phone copy is one at a time", delegate { TestPhoneOneAtATime(); });
             }
             finally
             {
@@ -461,6 +465,119 @@ namespace FolderDiffCopy
                 Need(found.Enabled, "both ways should be editable");
                 form.Hide();
             }
+        }
+
+        static void TestPhoneProfiles()
+        {
+            using (MainForm form = new MainForm())
+            {
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-2400, -2400);
+                form.Show();
+                Application.DoEvents();
+                ComboBox profile = null;
+                NumericUpDown parallel = null;
+                foreach (Control c in form.Controls)
+                {
+                    if (c is ComboBox) profile = (ComboBox)c;
+                    if (c is NumericUpDown) parallel = (NumericUpDown)c;
+                }
+                Need(profile != null && parallel != null, "missing profile or parallelization");
+                string[] phones = new string[] {
+                    "Hard drive to phone",
+                    "Solid-state drive to phone",
+                    "Phone to hard drive",
+                    "Phone to solid-state drive"
+                };
+                foreach (string name in phones)
+                {
+                    int index = profile.Items.IndexOf(name);
+                    Need(index > 0, "missing profile " + name);
+                    profile.SelectedIndex = profile.Items.IndexOf("Solid-state drive to solid-state drive");
+                    Application.DoEvents();
+                    Need(parallel.Enabled, "parallelization should unlock for drives");
+                    profile.SelectedIndex = index;
+                    Application.DoEvents();
+                    Need(!parallel.Enabled, name + " should grey out parallelization");
+                    Need(parallel.Value == 1, name + " should copy one file at a time");
+                }
+                profile.SelectedIndex = 0;
+                Application.DoEvents();
+                Need(parallel.Enabled, "parallelization should unlock again");
+                form.Hide();
+            }
+        }
+
+        static void TestPhonePlan()
+        {
+            var a = new Dictionary<string, PhoneEntry>(StringComparer.OrdinalIgnoreCase);
+            var b = new Dictionary<string, PhoneEntry>(StringComparer.OrdinalIgnoreCase);
+            long hour = 36000000000L;
+            long now = DateTime.UtcNow.ToFileTimeUtc();
+            a["same.jpg"] = Entry(100, now);
+            b["same.jpg"] = Entry(100, now - 5 * hour);
+            a["bigger.jpg"] = Entry(200, now);
+            b["bigger.jpg"] = Entry(150, now);
+            a["only-a.jpg"] = Entry(10, now);
+            b["only-b.jpg"] = Entry(20, now);
+            a["phone-newer.txt"] = Entry(5, now - 3 * hour);
+            b["phone-newer.txt"] = Entry(6, now);
+            a["close.txt"] = Entry(7, now);
+            b["close.txt"] = Entry(8, now + hour / 2);
+
+            int unchanged;
+            List<PlannedCopy> oneWay = PhoneDiff.Plan(a, b, false, out unchanged);
+            Need(unchanged == 1, "one way unchanged " + unchanged);
+            Need(oneWay.Count == 4, "one way count " + oneWay.Count);
+            foreach (PlannedCopy copy in oneWay)
+                Need(!copy.ToA, "one way copied toward A: " + copy.Rel);
+
+            List<PlannedCopy> both = PhoneDiff.Plan(a, b, true, out unchanged);
+            Need(unchanged == 1, "both ways unchanged " + unchanged);
+            Need(both.Count == 5, "both ways count " + both.Count);
+            foreach (PlannedCopy copy in both)
+            {
+                if (copy.Rel == "only-b.jpg" || copy.Rel == "phone-newer.txt")
+                    Need(copy.ToA, copy.Rel + " should go to A");
+                else
+                    Need(!copy.ToA, copy.Rel + " should go to B");
+            }
+        }
+
+        static PhoneEntry Entry(long size, long time)
+        {
+            PhoneEntry entry = new PhoneEntry();
+            entry.Size = size;
+            entry.WriteTime = time;
+            return entry;
+        }
+
+        static void TestPhoneNames()
+        {
+            string device = @"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\\?\usb#vid_18d1&pid_4ee1#0123456789#{6ac27878-a6fa-4155-ba85-f98f491d4f33}";
+            string folder = device + @"\SID-{10001,,123456789}\{00000016-0001-0001-0000-000000000000}";
+            Need(PhoneShell.IsPhoneItem(device), "device is a phone item");
+            Need(PhoneShell.IsPhoneDevice(device), "device root not detected");
+            Need(PhoneShell.IsPhoneItem(folder), "folder is a phone item");
+            Need(!PhoneShell.IsPhoneDevice(folder), "folder taken for the device");
+            Need(!PhoneShell.IsPhoneItem(@"::{031E4825-7B94-4DC3-B131-E946B44C8DD5}\Documents.library-ms"), "library taken for a phone");
+            Need(!PhoneShell.IsPhoneItem(@"C:\Music"), "drive folder taken for a phone");
+        }
+
+        static void TestPhoneOneAtATime()
+        {
+            CopySession session = new CopySession();
+            var jobs = new List<FileJob>();
+            FileJob phone = Named("phone.jpg");
+            phone.PhoneSource = "phone";
+            jobs.Add(phone);
+            session.SetJobs(jobs);
+            Need(session.OneAtATime, "a phone job should force one file at a time");
+            jobs.Clear();
+            jobs.Add(Named("pc.jpg"));
+            session.SetJobs(jobs);
+            Need(!session.OneAtATime, "a PC copy should not be limited");
         }
 
         static void TestPreviewReadOnly(string root)

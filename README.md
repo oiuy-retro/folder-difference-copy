@@ -15,6 +15,18 @@ A built copy is [`Folder.Difference.Copy.exe`](https://github.com/oiuy-retro/fol
 - Start at schedules the copy to begin at a chosen future date and time. Stop cancels the scheduled copy.
 - Long paths (`\\?\`) are enabled.
 - Cancel removes leftover `.fdc-partial` files.
+- Android phones and other devices that show up in Explorer (MTP) can be Folder A or Folder B. See [Phones](#phones).
+
+## Phones
+
+Plug the phone in with USB, unlock it, and set its USB mode to **File transfer**. Then use **Browse...** and pick a folder inside the phone's storage, such as `This PC\Pixel 8\Internal shared storage\Music`. The phone itself, Libraries, Network, and other places that aren't real folders are refused.
+
+- Either side can be the phone: PC to phone, phone to PC, or **Copy both ways**. Only one side can be a phone.
+- Phones take one file at a time over USB, so the app copies one file at a time whenever a phone is involved. Parallelization is greyed out at 1 for the phone profiles (Hard drive to phone, Solid-state drive to phone, Phone to hard drive, Phone to solid-state drive) and whenever either folder is on a phone.
+- **Comparing:** phones report modified times loosely (rounded, shifted by time zones, or set to the time of the copy), so a file counts as unchanged when its size matches. A file that changed but kept exactly the same size is not copied again. With **Copy both ways**, a file whose size differs is copied from the side whose modified time is more than an hour newer; otherwise Folder A wins.
+- **Unfinished files:** files are sent to the phone as `<name>.fdc-part` and renamed to the real name when the last byte arrives, so a file with its real name is always complete. If the phone refuses renames, the file is written under its real name and deleted right away if the copy fails. At the start of each run, leftover `.fdc-part` files in the phone folder are deleted and those files are copied again.
+- Phone to PC uses the same `.fdc-partial` file on the PC and gives the PC file the phone's modified time.
+- If the phone is locked, not in File transfer mode, or unplugged, the copy stops with a message that says so. Plug it back in, unlock it, and run the copy again.
 
 ## Run
 
@@ -35,7 +47,7 @@ build.bat
 copy FolderDiffCopy.exe dist\"Folder Difference Copy.exe"
 ```
 
-Sources: `Program.cs`, `Native.cs`, `Engine.cs`, `FolderDialog.cs`, `Win7Ux.cs`, `FileList.cs`, `MainForm.cs`, plus `app.manifest` and `app.ico`.
+Sources: `Program.cs`, `Native.cs`, `Engine.cs`, `Phone.cs`, `FolderDialog.cs`, `Win7Ux.cs`, `FileList.cs`, `MainForm.cs`, plus `app.manifest` and `app.ico`.
 
 Compiler: `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe` (C# 5 / .NET 4).
 
@@ -50,5 +62,6 @@ Compiler: `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe` (C# 5 / .NET
 | [.NET Framework 4](https://dotnet.microsoft.com/download/dotnet-framework/net40) | Microsoft .NET Framework EULA | Runtime. Not redistributed; the machine already has it. |
 | WinForms, System.IO | Microsoft | UI and file copy |
 | Windows Common Controls 6, Explorer `IFileDialog` | Microsoft | Visual styles and folder picker |
+| Explorer shell `IShellItem`, `IFileOperation` | Microsoft | Reading and writing phone folders. Part of Windows. |
 
 This program does not redistribute the .NET Framework or Windows.
