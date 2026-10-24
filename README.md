@@ -18,7 +18,7 @@ A built copy is [`Folder.Difference.Copy.exe`](https://github.com/oiuy-retro/fol
 
 ## Run
 
-Start `Folder Difference Copy.exe` on Windows 7 or later with [.NET Framework 4.0+](https://dotnet.microsoft.com/download/dotnet-framework/net40).
+Start `Folder Difference Copy.exe` on Windows 7 or later with [.NET Framework 4.7 or later](https://dotnet.microsoft.com/download/dotnet-framework/net48). Windows 10 version 1709 and later, and Windows 11, already include it. Windows 7 needs .NET Framework 4.7 or later installed first.
 
 Self-test (exits 0 on success):
 
@@ -47,7 +47,7 @@ Compiler: `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe` (C# 5 / .NET
 
 | Project | License | Use |
 | --- | --- | --- |
-| [.NET Framework 4](https://dotnet.microsoft.com/download/dotnet-framework/net40) | Microsoft .NET Framework EULA | Runtime. Not redistributed; the machine already has it. |
+| [.NET Framework 4.7 or later](https://dotnet.microsoft.com/download/dotnet-framework/net48) | Microsoft .NET Framework EULA | Runtime. Not redistributed; the machine already has it. |
 | WinForms, System.IO | Microsoft | UI and file copy |
 | Windows Common Controls 6, Explorer `IFileDialog` | Microsoft | Visual styles and folder picker |
 
