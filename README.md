@@ -14,7 +14,7 @@ A built copy is [`Folder.Difference.Copy.exe`](https://github.com/oiuy-retro/fol
 - Drive profiles set the parallelization and copy order to suit the drives you're copying between, such as hard drive to solid-state drive or the same solid-state drive.
 - Start at schedules the copy to begin at a chosen future date and time. Stop cancels the scheduled copy.
 - Long paths (`\\?\`) are enabled.
-- Cancel removes leftover `.fdc-partial` files.
+- Cancel removes leftover `.fdc-partial` files. Unfinished `.fdc-partial` files left by an interrupted run are skipped and removed at the start of the next copy.
 
 ## Run
 

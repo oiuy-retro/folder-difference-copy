@@ -10,9 +10,23 @@ namespace FolderDiffCopy
     {
         public static string Normalize(string path)
         {
-            if (path == null) return "";
+            string normalized;
+            TryNormalize(path, out normalized);
+            return normalized;
+        }
+
+        // Cleans up typed or picked text into a full path. Returns false when the text is not
+        // a usable path (for example it has characters like | or < in it); normalized is then
+        // the trimmed text as typed. A bare drive such as "C:" means the root of that drive.
+        public static bool TryNormalize(string path, out string normalized)
+        {
+            normalized = "";
+            if (path == null) return true;
             path = path.Trim().Trim('"').Trim();
-            if (path.Length == 0) return "";
+            if (path.Length == 0) return true;
+            if (path.Length == 2 && path[1] == ':' && char.IsLetter(path[0]))
+                path = path + "\\";
+            bool valid = true;
             try
             {
                 path = Path.GetFullPath(path);
@@ -20,12 +34,25 @@ namespace FolderDiffCopy
             catch (PathTooLongException)
             {
             }
+            catch (ArgumentException)
+            {
+                valid = false;
+            }
+            catch (NotSupportedException)
+            {
+                valid = false;
+            }
+            catch (System.Security.SecurityException)
+            {
+                valid = false;
+            }
             catch (IOException)
             {
             }
             if (path.Length > 3)
                 path = path.TrimEnd('\\');
-            return path;
+            normalized = path;
+            return valid;
         }
 
         public static bool Exists(string path)
@@ -46,6 +73,22 @@ namespace FolderDiffCopy
             if (string.Equals(left, right, StringComparison.OrdinalIgnoreCase)) return false;
             return right.StartsWith(left, StringComparison.OrdinalIgnoreCase)
                 || left.StartsWith(right, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // True when the two folders are the same folder or one is inside the other. Checks the
+        // text first (with any \\?\ prefix removed), then the real location on disk, so a
+        // junction, symbolic link, subst drive, or mapped drive that points into the other
+        // folder is caught too. A folder that does not exist yet is checked through its
+        // nearest existing parent.
+        public static bool Overlap(string a, string b)
+        {
+            string left = Native.Pretty(a);
+            string right = Native.Pretty(b);
+            if (Same(left, right) || OneInsideTheOther(left, right)) return true;
+            string realLeft = Native.RealPath(left);
+            string realRight = Native.RealPath(right);
+            if (realLeft == null || realRight == null) return false;
+            return Same(realLeft, realRight) || OneInsideTheOther(realLeft, realRight);
         }
 
         public static bool IsDriveRoot(string path)
@@ -124,6 +167,7 @@ namespace FolderDiffCopy
         public int Unreadable;
         public string FirstProblem;
         public bool Cancelled;
+        public int LeftoversRemoved;
     }
 
     internal static class Diff
@@ -151,11 +195,11 @@ namespace FolderDiffCopy
                 throw new InvalidOperationException("Folder A does not exist.");
             if (writeFolders && !Paths.Exists(folderB))
                 throw new InvalidOperationException("Folder B does not exist.");
-            if (Paths.Same(folderA, folderB) || Paths.OneInsideTheOther(folderA, folderB))
+            if (Paths.Overlap(folderA, folderB))
                 throw new InvalidOperationException("Pick two folders that do not contain each other.");
 
             CompareResult result = new CompareResult();
-            var filesA = bothWays ? new Dictionary<string, FileMeta>(StringComparer.OrdinalIgnoreCase) : null;
+            var filesA = new Dictionary<string, FileMeta>(StringComparer.OrdinalIgnoreCase);
             var filesB = new Dictionary<string, FileMeta>(StringComparer.OrdinalIgnoreCase);
             var dirsB = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var dirsA = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -173,39 +217,43 @@ namespace FolderDiffCopy
                 return result;
             }
 
-            if (bothWays)
+            ScanTree(folderA, dirsA, true, status, delegate(string rel, FileMeta meta)
             {
-                ScanTree(folderA, dirsA, true, status, delegate(string rel, FileMeta meta)
-                {
-                    if (!filesA.ContainsKey(rel)) filesA[rel] = meta;
-                });
+                if (!filesA.ContainsKey(rel)) filesA[rel] = meta;
+            });
+            if (status.Cancel)
+            {
+                result.Cancelled = true;
+                return result;
+            }
+
+            // Unfinished copies from an earlier run that was cut off are never copied.
+            List<string> leftoversB = TakeLeftovers(filesB, filesA);
+            List<string> leftoversA = TakeLeftovers(filesA, filesB);
+
+            foreach (KeyValuePair<string, FileMeta> pair in filesA)
+            {
                 if (status.Cancel)
                 {
                     result.Cancelled = true;
                     return result;
                 }
-
-                foreach (KeyValuePair<string, FileMeta> pair in filesA)
+                string rel = pair.Key;
+                FileMeta meta = pair.Value;
+                FileMeta other;
+                bool exists = filesB.TryGetValue(rel, out other);
+                if (exists && other.Size == meta.Size && !TimesDiffer(meta.WriteTime, other.WriteTime))
                 {
-                    if (status.Cancel)
-                    {
-                        result.Cancelled = true;
-                        return result;
-                    }
-                    string rel = pair.Key;
-                    FileMeta meta = pair.Value;
-                    FileMeta other;
-                    bool exists = filesB.TryGetValue(rel, out other);
-                    if (exists && other.Size == meta.Size && !TimesDiffer(meta.WriteTime, other.WriteTime))
-                    {
-                        result.Unchanged++;
-                        continue;
-                    }
-                    if (exists && other.WriteTime > meta.WriteTime)
-                        result.Jobs.Add(MakeJob(folderB, folderA, rel, other.Size, dirsA, filesA, true, true));
-                    else
-                        result.Jobs.Add(MakeJob(folderA, folderB, rel, meta.Size, dirsB, filesB, false, true));
+                    result.Unchanged++;
+                    continue;
                 }
+                if (bothWays && exists && other.WriteTime > meta.WriteTime)
+                    result.Jobs.Add(MakeJob(folderB, folderA, rel, other.Size, dirsA, filesA, true, true));
+                else
+                    result.Jobs.Add(MakeJob(folderA, folderB, rel, meta.Size, dirsB, filesB, false, bothWays));
+            }
+            if (bothWays)
+            {
                 foreach (KeyValuePair<string, FileMeta> pair in filesB)
                 {
                     if (status.Cancel)
@@ -217,26 +265,16 @@ namespace FolderDiffCopy
                     result.Jobs.Add(MakeJob(folderB, folderA, pair.Key, pair.Value.Size, dirsA, filesA, true, true));
                 }
             }
-            else
-            {
-                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                ScanTree(folderA, dirsA, true, status, delegate(string rel, FileMeta meta)
-                {
-                    if (!seen.Add(rel)) return;
-                    FileMeta other;
-                    bool exists = filesB.TryGetValue(rel, out other);
-                    if (exists && other.Size == meta.Size && !TimesDiffer(meta.WriteTime, other.WriteTime))
-                    {
-                        result.Unchanged++;
-                        return;
-                    }
-                    result.Jobs.Add(MakeJob(folderA, folderB, rel, meta.Size, dirsB, filesB, false, false));
-                });
-            }
             if (status.Cancel)
             {
                 result.Cancelled = true;
                 return result;
+            }
+
+            if (writeFolders)
+            {
+                result.LeftoversRemoved += RemoveLeftovers(folderB, leftoversB);
+                if (bothWays) result.LeftoversRemoved += RemoveLeftovers(folderA, leftoversA);
             }
 
             result.Jobs.Sort(delegate(FileJob x, FileJob y)
@@ -309,6 +347,56 @@ namespace FolderDiffCopy
                     if (result.FirstProblem == null) result.FirstProblem = ex.Message;
                 }
             }
+        }
+
+        public const string TempSuffix = ".fdc-partial";
+
+        // The temporary name a copy is written under until it is complete.
+        public static string TempPathFor(string destPath)
+        {
+            return destPath + TempSuffix;
+        }
+
+        // An unfinished copy left by an earlier run is named exactly "<name>.fdc-partial". It
+        // only counts as one when the other folder has a file called "<name>" at the same place
+        // (the file that was being copied), that file is at least as large as the leftover, and
+        // the other folder has no "<name>.fdc-partial" of its own there. Anything else,
+        // including a file of the user's own that happens to end in .fdc-partial, is a normal
+        // file. Matching entries are taken out of files and returned.
+        static List<string> TakeLeftovers(Dictionary<string, FileMeta> files, Dictionary<string, FileMeta> otherSide)
+        {
+            var found = new List<string>();
+            foreach (KeyValuePair<string, FileMeta> pair in files)
+            {
+                if (IsLeftover(pair.Key, pair.Value, otherSide)) found.Add(pair.Key);
+            }
+            foreach (string rel in found)
+                files.Remove(rel);
+            return found;
+        }
+
+        internal static bool IsLeftover(string rel, FileMeta meta, Dictionary<string, FileMeta> otherSide)
+        {
+            if (rel == null || rel.Length <= TempSuffix.Length) return false;
+            if (!rel.EndsWith(TempSuffix, StringComparison.OrdinalIgnoreCase)) return false;
+            string original = rel.Substring(0, rel.Length - TempSuffix.Length);
+            if (original.EndsWith("\\")) return false;
+            if (otherSide.ContainsKey(rel)) return false;
+            FileMeta source;
+            if (!otherSide.TryGetValue(original, out source)) return false;
+            return meta.Size <= source.Size;
+        }
+
+        static int RemoveLeftovers(string root, List<string> leftovers)
+        {
+            int removed = 0;
+            foreach (string rel in leftovers)
+            {
+                string full = Native.ToExtended(Join(root, rel));
+                Native.DeleteQuiet(full);
+                if (!Native.FileExists(full)) removed++;
+            }
+            return removed;
         }
 
         static bool TimesDiffer(long a, long b)
@@ -760,7 +848,7 @@ namespace FolderDiffCopy
         CopyOutcome CopyOne(FileJob job)
         {
             if (cancel) return CopyOutcome.Cancelled;
-            string temp = job.DestPath + ".fdc-partial";
+            string temp = Diff.TempPathFor(job.DestPath);
             bool committed = false;
             OpenedRead source = null;
             FileStream output = null;
@@ -774,7 +862,11 @@ namespace FolderDiffCopy
                     Interlocked.Add(ref totalBytes, source.Size - job.Size);
                     job.Size = source.Size;
                 }
-                Native.DeleteQuiet(temp);
+                // Leftovers from earlier runs were already removed by the compare, so a file
+                // that is still sitting under the temporary name belongs to the user. Write
+                // under a different temporary name instead of overwriting it.
+                if (Native.FileExists(temp))
+                    temp = Diff.TempPathFor(job.DestPath + "." + Guid.NewGuid().ToString("N").Substring(0, 8));
                 output = Native.OpenForWrite(temp);
                 byte[] buffer = new byte[256 * 1024];
                 long written = 0;
@@ -791,9 +883,11 @@ namespace FolderDiffCopy
                     if (pause > 0) Thread.Sleep(pause);
                 }
                 if (cancel) return CopyOutcome.Cancelled;
+                // Write out the last buffered bytes first, so setting the times is the final
+                // change to the file and no later write can move its modified time.
+                output.Flush();
                 if (!Native.ApplyTimes(output.SafeFileHandle, source.Created, source.Accessed, source.Written))
                     throw new IOException("Could not keep the modified time of " + job.RelativePath + ".");
-                output.Flush();
                 output.Dispose();
                 output = null;
                 source.Dispose();
