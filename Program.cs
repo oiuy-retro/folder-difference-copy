@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Text;
@@ -72,6 +73,12 @@ namespace FolderDiffCopy
                 failed += Check(log, "copy both ways", delegate { TestBothWays(root); });
                 failed += Check(log, "copy both ways preview", delegate { TestBothWaysPreview(root); });
                 failed += Check(log, "copy both ways option", delegate { TestBothWaysOption(); });
+                failed += Check(log, "leftover partial files are skipped and removed", delegate { TestLeftovers(root); });
+                failed += Check(log, "copy both ways leftover partial files", delegate { TestBothWaysLeftovers(root); });
+                failed += Check(log, "time kept after the last bytes", delegate { TestTimeAfterLastBytes(root); });
+                failed += Check(log, "refuses nested folders through links", delegate { TestRejectNestedLinks(root); });
+                failed += Check(log, "folder text is cleaned up", delegate { TestNormalize(); });
+                failed += Check(log, "stop at the end of a compare", delegate { TestStopAtCompareEnd(); });
             }
             finally
             {
@@ -675,6 +682,167 @@ namespace FolderDiffCopy
                 if (!object.ReferenceEquals(session.Get(i), expected[i])) return false;
             }
             return true;
+        }
+
+        static void TestLeftovers(string root)
+        {
+            string a = Path.Combine(root, "left-a");
+            string b = Path.Combine(root, "left-b");
+            Write(Path.Combine(a, "sub", "song.m4a"), "song");
+            Write(Path.Combine(a, "own.fdc-partial"), "a file of the user's own");
+            Write(Path.Combine(b, "sub", "song.m4a.fdc-partial"), "half");
+            Write(Path.Combine(b, "mine.fdc-partial"), "also the user's own");
+            Write(Path.Combine(a, "tiny.txt"), "t");
+            Write(Path.Combine(b, "tiny.txt.fdc-partial"), "bigger than the file it would be a copy of");
+            string leftover = Path.Combine(b, "sub", "song.m4a.fdc-partial");
+
+            CompareResult preview = Diff.Compare(a, b, new ScanStatus(), false);
+            Need(preview.Jobs.Count == 3, "preview jobs " + preview.Jobs.Count);
+            foreach (FileJob job in preview.Jobs)
+                Need(!job.RelativePath.EndsWith("song.m4a.fdc-partial"), "preview listed the leftover");
+            Need(File.Exists(leftover), "preview removed the leftover");
+            Need(preview.LeftoversRemoved == 0, "preview counted removals");
+
+            CompareResult result = Diff.Compare(a, b, new ScanStatus());
+            Need(result.LeftoversRemoved == 1, "removed " + result.LeftoversRemoved);
+            Need(!File.Exists(leftover), "leftover still there");
+            Need(File.Exists(Path.Combine(b, "mine.fdc-partial")), "the user's own file in B was removed");
+            Need(File.Exists(Path.Combine(b, "tiny.txt.fdc-partial")), "a larger .fdc-partial was removed");
+            Need(result.Jobs.Count == 3, "jobs " + result.Jobs.Count);
+            CopySession session = new CopySession();
+            session.SetJobs(result.Jobs);
+            session.Start(1);
+            Wait(session, 20000);
+            Need(File.ReadAllText(Path.Combine(b, "sub", "song.m4a")) == "song", "song not copied");
+            Need(File.ReadAllText(Path.Combine(b, "own.fdc-partial")) == "a file of the user's own", "the user's own file in A was not copied");
+            Need(File.ReadAllText(Path.Combine(b, "mine.fdc-partial")) == "also the user's own", "the user's own file in B changed");
+            Need(File.ReadAllText(Path.Combine(b, "tiny.txt")) == "t", "tiny not copied");
+            Need(File.ReadAllText(Path.Combine(b, "tiny.txt.fdc-partial")) == "bigger than the file it would be a copy of", "copying tiny.txt overwrote the user's tiny.txt.fdc-partial");
+            Need(Directory.GetFiles(b, "*.fdc-partial", SearchOption.AllDirectories).Length == 3, "temporary files left behind");
+        }
+
+        static void TestBothWaysLeftovers(string root)
+        {
+            string a = Path.Combine(root, "leftboth-a");
+            string b = Path.Combine(root, "leftboth-b");
+            Write(Path.Combine(a, "doc.txt.fdc-partial"), "half");
+            Write(Path.Combine(b, "doc.txt"), "whole");
+            Write(Path.Combine(a, "pic.jpg"), "picture");
+            Write(Path.Combine(b, "pic.jpg.fdc-partial"), "half");
+            CompareResult result = Diff.Compare(a, b, new ScanStatus(), true, true);
+            Need(result.LeftoversRemoved == 2, "removed " + result.LeftoversRemoved);
+            Need(result.Jobs.Count == 2, "jobs " + result.Jobs.Count);
+            CopySession session = new CopySession();
+            session.SetJobs(result.Jobs);
+            session.Start(2);
+            Wait(session, 20000);
+            Need(File.ReadAllText(Path.Combine(a, "doc.txt")) == "whole", "doc not copied to A");
+            Need(File.ReadAllText(Path.Combine(b, "pic.jpg")) == "picture", "pic not copied to B");
+            Need(!File.Exists(Path.Combine(a, "doc.txt.fdc-partial")), "leftover in A");
+            Need(!File.Exists(Path.Combine(b, "pic.jpg.fdc-partial")), "leftover in B");
+        }
+
+        static void TestTimeAfterLastBytes(string root)
+        {
+            string a = Path.Combine(root, "tail-a");
+            string b = Path.Combine(root, "tail-b");
+            Directory.CreateDirectory(a);
+            Directory.CreateDirectory(b);
+            DateTime stamp = new DateTime(2018, 3, 4, 5, 6, 8, DateTimeKind.Utc);
+            int[] sizes = new int[] { 1, 1000, 256 * 1024 + 123, 3 * 256 * 1024 + 7 };
+            for (int i = 0; i < sizes.Length; i++)
+            {
+                string file = Path.Combine(a, "f" + i.ToString() + ".bin");
+                byte[] data = new byte[sizes[i]];
+                for (int j = 0; j < data.Length; j++) data[j] = (byte)(j * 7 + i);
+                File.WriteAllBytes(file, data);
+                File.SetLastWriteTimeUtc(file, stamp);
+            }
+            CompareResult result = Diff.Compare(a, b, new ScanStatus());
+            Need(result.Jobs.Count == sizes.Length, "jobs " + result.Jobs.Count);
+            CopySession session = new CopySession();
+            session.SetJobs(result.Jobs);
+            session.Start(2);
+            Wait(session, 20000);
+            for (int i = 0; i < sizes.Length; i++)
+            {
+                string name = "f" + i.ToString() + ".bin";
+                string copy = Path.Combine(b, name);
+                Need(new FileInfo(copy).Length == sizes[i], name + " size");
+                Need(File.GetLastWriteTimeUtc(copy) == stamp, name + " time " + File.GetLastWriteTimeUtc(copy).ToString("o"));
+                Need(Native.Fnv(Native.ToExtended(copy)) == Native.Fnv(Native.ToExtended(Path.Combine(a, name))), name + " checksum");
+            }
+            CompareResult again = Diff.Compare(a, b, new ScanStatus());
+            Need(again.Jobs.Count == 0, "copied again: " + again.Jobs.Count);
+        }
+
+        static void TestRejectNestedLinks(string root)
+        {
+            string a = Path.Combine(root, "link-a");
+            string inside = Path.Combine(a, "inside");
+            Directory.CreateDirectory(inside);
+            RejectsNested(a, @"\\?\" + inside, "\\\\?\\ form of a folder inside A");
+            RejectsNested(@"\\?\" + a, a, "\\\\?\\ form of the same folder");
+
+            string junction = Path.Combine(root, "link-junction");
+            var start = new ProcessStartInfo("cmd.exe", "/c mklink /J \"" + junction + "\" \"" + inside + "\"");
+            start.UseShellExecute = false;
+            start.CreateNoWindow = true;
+            using (Process process = Process.Start(start))
+            {
+                process.WaitForExit(20000);
+            }
+            Need(Directory.Exists(junction), "could not create a test junction with mklink /J");
+            try
+            {
+                RejectsNested(a, junction, "junction to a folder inside A");
+                RejectsNested(junction, a, "junction as A pointing inside B");
+                Need(Paths.Overlap(a, Path.Combine(junction, "not-yet")), "accepted a new folder under a junction into A");
+                string other = Path.Combine(root, "link-other");
+                Directory.CreateDirectory(other);
+                Need(!Paths.Overlap(other, junction), "separate folders reported as nested");
+            }
+            finally
+            {
+                try { Directory.Delete(junction, false); }
+                catch { }
+            }
+            Need(Directory.Exists(inside), "removing the junction removed its target");
+        }
+
+        static void RejectsNested(string a, string b, string what)
+        {
+            bool threw = false;
+            try { Diff.Compare(a, b, new ScanStatus()); }
+            catch (InvalidOperationException) { threw = true; }
+            Need(threw, "accepted " + what);
+        }
+
+        static void TestNormalize()
+        {
+            string normalized;
+            Need(Paths.TryNormalize("C:", out normalized) && normalized == "C:\\", "C: became " + normalized);
+            Need(Paths.TryNormalize("d:", out normalized) && normalized == "d:\\", "d: became " + normalized);
+            Need(Paths.TryNormalize("  \"C:\\Music\\\"  ", out normalized) && normalized == "C:\\Music", "quoted path became " + normalized);
+            Need(!Paths.TryNormalize("C:\\a|b", out normalized), "| was accepted");
+            Need(!Paths.TryNormalize("C:\\a<b>", out normalized), "< > were accepted");
+            Need(Paths.Normalize("C:\\a|b") == "C:\\a|b", "invalid text was changed");
+            Need(Paths.TryNormalize("", out normalized) && normalized == "", "empty text");
+        }
+
+        static void TestStopAtCompareEnd()
+        {
+            CompareResult done = new CompareResult();
+            ScanStatus running = new ScanStatus();
+            Need(!MainForm.CompareWasStopped(done, running, false), "a finished compare was treated as stopped");
+            ScanStatus stopped = new ScanStatus();
+            stopped.Cancel = true;
+            Need(MainForm.CompareWasStopped(done, stopped, false), "Stop at the end of a compare still copied");
+            Need(MainForm.CompareWasStopped(done, running, true), "closing at the end of a compare still copied");
+            CompareResult cancelled = new CompareResult();
+            cancelled.Cancelled = true;
+            Need(MainForm.CompareWasStopped(cancelled, running, false), "cancelled compare");
+            Need(MainForm.CompareWasStopped(null, running, false), "missing result");
         }
 
         static void TestDialogProbe()

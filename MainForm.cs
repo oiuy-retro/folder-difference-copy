@@ -54,6 +54,7 @@ namespace FolderDiffCopy
         string hoverStatus;
         bool statusError;
         int dirsCreated;
+        int leftoversRemoved;
         int linksSkipped;
         int unreadable;
         string firstProblem = "";
@@ -675,6 +676,7 @@ namespace FolderDiffCopy
             BeginClock();
             metrics.SetValue(4, ElapsedText());
             dirsCreated = 0;
+            leftoversRemoved = 0;
             linksSkipped = 0;
             unreadable = 0;
             firstProblem = "";
@@ -706,8 +708,8 @@ namespace FolderDiffCopy
 
         bool TryReadFolders(out string a, out string b, out string error)
         {
-            a = Paths.Normalize(folderA.Text);
-            b = Paths.Normalize(folderB.Text);
+            bool validA = Paths.TryNormalize(folderA.Text, out a);
+            bool validB = Paths.TryNormalize(folderB.Text, out b);
             suppressFolderEvent = true;
             folderA.Text = a;
             folderB.Text = b;
@@ -717,12 +719,22 @@ namespace FolderDiffCopy
                 error = "Choose Folder A and Folder B.";
                 return false;
             }
+            if (!validA)
+            {
+                error = "Folder A is not a valid folder path.";
+                return false;
+            }
+            if (!validB)
+            {
+                error = "Folder B is not a valid folder path.";
+                return false;
+            }
             if (!Paths.Exists(a))
             {
                 error = "Folder A does not exist.";
                 return false;
             }
-            if (Paths.Same(a, b) || Paths.OneInsideTheOther(a, b))
+            if (Paths.Overlap(a, b))
             {
                 error = "Pick two folders that do not contain each other.";
                 return false;
@@ -749,7 +761,7 @@ namespace FolderDiffCopy
                 if (closeAfterStop) Close();
                 return;
             }
-            if (result == null || result.Cancelled)
+            if (CompareWasStopped(result, scan, closeAfterStop))
             {
                 previewOnly = false;
                 previewedA = null;
@@ -767,6 +779,7 @@ namespace FolderDiffCopy
 
             dirsCreated = result.DirsCreated;
             linksSkipped = result.LinksSkipped;
+            leftoversRemoved = result.LeftoversRemoved;
             unreadable = result.Unreadable;
             firstProblem = result.FirstProblem ?? "";
             if (previewOnly)
@@ -788,6 +801,15 @@ namespace FolderDiffCopy
                 FinishCopy();
             else
                 SetStatus("Copying..." + Notes(), unreadable > 0 || result.DirCreateFailed > 0);
+        }
+
+        // True when the compare should not lead to a copy: it was cancelled, or Stop was
+        // pressed (or the window was closed) just as the compare was finishing.
+        internal static bool CompareWasStopped(CompareResult result, ScanStatus scan, bool closing)
+        {
+            if (result == null || result.Cancelled) return true;
+            if (scan != null && scan.Cancel) return true;
+            return closing;
         }
 
         void OnStop(object sender, EventArgs e)
@@ -984,6 +1006,8 @@ namespace FolderDiffCopy
         string Notes()
         {
             string note = "";
+            if (leftoversRemoved > 0)
+                note += " Removed " + leftoversRemoved.ToString("N0") + " unfinished files from an earlier run.";
             if (linksSkipped > 0)
                 note += " Skipped " + linksSkipped.ToString("N0") + " links.";
             if (unreadable > 0)
