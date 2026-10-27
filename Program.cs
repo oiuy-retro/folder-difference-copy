@@ -86,6 +86,7 @@ namespace FolderDiffCopy
                 failed += Check(log, "phone shell item can be kept", delegate { TestPhoneGitCookie(); });
                 failed += Check(log, "phone relative child", delegate { TestPhoneRelativeChild(); });
                 failed += Check(log, "phone copy to a disk folder", delegate { TestPhoneCopyToFolder(root); });
+                failed += Check(log, "phone part file is renamed", delegate { TestPhonePartRename(root); });
             }
             finally
             {
@@ -664,6 +665,41 @@ namespace FolderDiffCopy
                 }
             });
             Need(File.ReadAllText(Path.Combine(destDir, "out.txt")) == "hello-phone-copy", "copied file contents");
+        }
+
+        static void TestPhonePartRename(string root)
+        {
+            string dir = Path.Combine(root, "phone-part");
+            string src = Path.Combine(dir, "src.txt");
+            string destDir = Path.Combine(dir, "dest");
+            Directory.CreateDirectory(destDir);
+            File.WriteAllText(src, "part-rename");
+            PhoneShell.RunSta(delegate
+            {
+                IShellItem source = PhoneShell.Open(src);
+                IShellItem folder = PhoneShell.Open(destDir);
+                Need(source != null && folder != null, "could not open part-rename folders");
+                IShellItem part = null;
+                IShellItem kept = null;
+                try
+                {
+                    PhoneShell.CopyToFolder(source, folder, "out.txt" + PhoneShell.PartSuffix, null, null);
+                    part = PhoneShell.FindChild(folder, "out.txt" + PhoneShell.PartSuffix);
+                    Need(part != null, "part file missing");
+                    PhoneShell.RenameItem(part, "out.txt");
+                    kept = PhoneShell.FindChild(folder, "out.txt");
+                    Need(kept != null, "renamed file missing");
+                }
+                finally
+                {
+                    PhoneShell.Release(part);
+                    PhoneShell.Release(kept);
+                    PhoneShell.Release(source);
+                    PhoneShell.Release(folder);
+                }
+            });
+            Need(File.ReadAllText(Path.Combine(destDir, "out.txt")) == "part-rename", "renamed file contents");
+            Need(!File.Exists(Path.Combine(destDir, "out.txt" + PhoneShell.PartSuffix)), "part file left behind");
         }
 
         static int RunPhoneProbe()

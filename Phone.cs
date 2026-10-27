@@ -65,6 +65,7 @@ namespace FolderDiffCopy
         public readonly Dictionary<string, string> Dirs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public readonly Dictionary<string, string> Files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public readonly List<string> Leftovers = new List<string>();
+        public volatile bool NoRename;
         public readonly object Gate = new object();
 
         public string DirItem(string rel)
@@ -1871,8 +1872,11 @@ namespace FolderDiffCopy
             }
         }
 
-        // PC to phone: write under the real name. Phones do not rename '.fdc-part'
-        // files, so that extra step left unfinished names on the device.
+        // PC to phone: copy as '<name>.fdc-part', then rename it to the real name, so a
+        // file with its real name on the phone is always complete. Stop, unplug, or a
+        // crash leaves only the '.fdc-part' name, which scan skips and Start deletes.
+        // If the phone refuses the rename, the rest of the run writes the real name
+        // and deletes that file right away if the copy fails.
         CopyOutcome CopyToPhone(FileJob job)
         {
             PhoneTree tree = job.PhoneDest;
@@ -1885,7 +1889,8 @@ namespace FolderDiffCopy
             IShellItem source = null;
             IShellItem kept = null;
             bool committed = false;
-            bool started = false;
+            bool partStarted = false;
+            bool directStarted = false;
             try
             {
                 using (OpenedRead probe = Native.OpenForRead(job.SourcePath))
@@ -1904,22 +1909,56 @@ namespace FolderDiffCopy
                 Action<uint, uint> progress = delegate(uint total, uint soFar) { Report(job, total, soFar); };
                 Func<bool> stopping = delegate { return cancel; };
 
-                RemoveOld(tree, rel);
-                PhoneShell.DeleteNamedQuiet(folder, partName);
+                if (!tree.NoRename)
+                {
+                    PhoneShell.DeleteNamedQuiet(folder, partName);
+                    partStarted = true;
+                    PhoneShell.CopyToFolder(source, folder, partName, progress, stopping);
+                    if (cancel) return CopyOutcome.Cancelled;
+                    IShellItem part = PhoneShell.FindChild(folder, partName);
+                    if (part == null)
+                    {
+                        kept = PhoneShell.FindChild(folder, name);
+                        if (kept != null)
+                            return KeepPhoneFile(tree, rel, kept, ref kept, ref committed, job);
+                        throw new PhoneException("The phone did not keep the copied file.");
+                    }
+                    RemoveOld(tree, rel);
+                    bool renamed = false;
+                    try
+                    {
+                        PhoneShell.RenameItem(part, name);
+                        renamed = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        if (PhoneErrors.Describe(ex) == PhoneErrors.Unplugged) throw;
+                    }
+                    PhoneShell.Release(part);
+                    if (renamed)
+                    {
+                        kept = PhoneShell.FindChild(folder, name);
+                        if (kept != null)
+                            return KeepPhoneFile(tree, rel, kept, ref kept, ref committed, job);
+                    }
+                    tree.NoRename = true;
+                    PhoneShell.DeleteNamedQuiet(folder, partName);
+                    partStarted = false;
+                    ResetProgress(job);
+                }
+                else
+                {
+                    RemoveOld(tree, rel);
+                }
 
-                started = true;
-                string made = PhoneShell.CopyToFolder(source, folder, name, progress, stopping);
+                PhoneShell.DeleteNamedQuiet(folder, partName);
+                directStarted = true;
+                PhoneShell.CopyToFolder(source, folder, name, progress, stopping);
                 if (cancel) return CopyOutcome.Cancelled;
                 kept = PhoneShell.FindChild(folder, name);
                 if (kept == null)
                     throw new PhoneException("The phone did not keep the copied file.");
-                if (string.IsNullOrEmpty(made)) made = PhoneShell.ParsingName(kept);
-                tree.SetFile(rel, made);
-                tree.SetLive(rel, kept);
-                kept = null;
-                committed = true;
-                Complete(job);
-                return CopyOutcome.Success;
+                return KeepPhoneFile(tree, rel, kept, ref kept, ref committed, job);
             }
             catch (Exception ex)
             {
@@ -1934,13 +1973,26 @@ namespace FolderDiffCopy
                     long partial = Interlocked.Exchange(ref job.Copied, 0);
                     if (partial != 0)
                         Interlocked.Add(ref copiedBytes, -partial);
-                    if (started)
+                    if (partStarted)
+                        PhoneShell.DeleteNamedQuiet(folder, partName);
+                    if (directStarted)
                         PhoneShell.DeleteNamedQuiet(folder, name);
                 }
                 PhoneShell.Release(kept);
                 PhoneShell.Release(source);
                 PhoneShell.Release(folder);
             }
+        }
+
+        CopyOutcome KeepPhoneFile(PhoneTree tree, string rel, IShellItem item, ref IShellItem kept, ref bool committed, FileJob job)
+        {
+            string made = PhoneShell.ParsingName(item);
+            tree.SetFile(rel, made);
+            tree.SetLive(rel, item);
+            kept = null;
+            committed = true;
+            Complete(job);
+            return CopyOutcome.Success;
         }
 
         static void RemoveOld(PhoneTree tree, string rel)
