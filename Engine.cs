@@ -95,6 +95,8 @@ namespace FolderDiffCopy
         internal string PhoneSource;
         internal long PhoneTime;
         internal PhoneTree PhoneDest;
+        internal PhoneTree PhoneFrom;
+        internal IShellItem PhoneLive;
 
         public bool OnPhone
         {

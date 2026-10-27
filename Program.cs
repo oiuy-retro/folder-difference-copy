@@ -84,6 +84,8 @@ namespace FolderDiffCopy
                 failed += Check(log, "phone copy is one at a time", delegate { TestPhoneOneAtATime(); });
                 failed += Check(log, "phone path is not a disk folder", delegate { TestPhonePathNotDisk(); });
                 failed += Check(log, "phone shell item can be kept", delegate { TestPhoneGitCookie(); });
+                failed += Check(log, "phone relative child", delegate { TestPhoneRelativeChild(); });
+                failed += Check(log, "phone copy to a disk folder", delegate { TestPhoneCopyToFolder(root); });
             }
             finally
             {
@@ -614,6 +616,54 @@ namespace FolderDiffCopy
                     PhoneShell.Revoke(leftover);
                 }
             }
+        }
+
+        static void TestPhoneRelativeChild()
+        {
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            PhoneShell.RunSta(delegate
+            {
+                IShellItem parent = PhoneShell.Open(windows);
+                Need(parent != null, "could not open Windows folder");
+                IShellItem child = null;
+                try
+                {
+                    child = PhoneShell.RelativeChild(parent, "System32");
+                    Need(child != null, "relative child missing");
+                    Need(PhoneShell.IsFolder(child), "System32 should be a folder");
+                }
+                finally
+                {
+                    PhoneShell.Release(child);
+                    PhoneShell.Release(parent);
+                }
+            });
+        }
+
+        static void TestPhoneCopyToFolder(string root)
+        {
+            string dir = Path.Combine(root, "phone-copy");
+            string src = Path.Combine(dir, "src.txt");
+            string destDir = Path.Combine(dir, "dest");
+            Directory.CreateDirectory(destDir);
+            File.WriteAllText(src, "hello-phone-copy");
+            PhoneShell.RunSta(delegate
+            {
+                IShellItem source = PhoneShell.Open(src);
+                IShellItem folder = PhoneShell.Open(destDir);
+                Need(source != null && folder != null, "could not open copy folders");
+                try
+                {
+                    string made = PhoneShell.CopyToFolder(source, folder, "out.txt", null, null);
+                    Need(!string.IsNullOrEmpty(made), "copy did not return a path");
+                }
+                finally
+                {
+                    PhoneShell.Release(source);
+                    PhoneShell.Release(folder);
+                }
+            });
+            Need(File.ReadAllText(Path.Combine(destDir, "out.txt")) == "hello-phone-copy", "copied file contents");
         }
 
         static int RunPhoneProbe()

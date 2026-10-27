@@ -87,6 +87,35 @@ namespace FolderDiffCopy
             }
         }
 
+        readonly Dictionary<string, IShellItem> liveItems = new Dictionary<string, IShellItem>(StringComparer.OrdinalIgnoreCase);
+
+        public void SetLive(string rel, IShellItem item)
+        {
+            if (item == null) return;
+            lock (Gate) liveItems[rel ?? ""] = item;
+        }
+
+        public IShellItem GetLive(string rel)
+        {
+            lock (Gate)
+            {
+                IShellItem item;
+                return liveItems.TryGetValue(rel ?? "", out item) ? item : null;
+            }
+        }
+
+        public bool Owns(IShellItem item)
+        {
+            if (item == null) return false;
+            if (object.ReferenceEquals(item, Live)) return true;
+            lock (Gate)
+            {
+                foreach (IShellItem held in liveItems.Values)
+                    if (object.ReferenceEquals(held, item)) return true;
+            }
+            return false;
+        }
+
         public void SetFile(string rel, string item)
         {
             lock (Gate)
@@ -107,6 +136,7 @@ namespace FolderDiffCopy
         public long Size;
         public long WriteTime;
         public string Item;
+        public IShellItem Live;
     }
 
     internal static class PhoneErrors
@@ -172,7 +202,7 @@ namespace FolderDiffCopy
         const int ShcontfIncludeHidden = 0x80;
         const int ShcontfStorage = 0x800;
         const string ThisPcFolder = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
-        const uint FofNoUi = 0x4 | 0x10 | 0x200 | 0x400;
+        const uint FofNoUi = 0x4 | 0x10 | 0x200 | 0x400 | 0x2000;
         const uint FofxEarlyFailure = 0x00100000;
         const uint FileAttributeDirectory = 0x10;
         const int SFalse = 1;
@@ -484,21 +514,11 @@ namespace FolderDiffCopy
 
         public static List<IShellItem> Children(IShellItem folder)
         {
-            List<IShellItem> viaApp = null;
-            Exception appError = null;
-            try { viaApp = ChildrenByShellApp(folder); }
-            catch (Exception ex) { appError = ex; }
-            if (viaApp != null && viaApp.Count > 0) return viaApp;
-
             List<IShellItem> viaFolder = null;
             Exception folderError = null;
             try { viaFolder = ChildrenByShellFolder(folder); }
             catch (Exception ex) { folderError = ex; }
-            if (viaFolder != null && viaFolder.Count > 0)
-            {
-                ReleaseList(viaApp);
-                return viaFolder;
-            }
+            if (viaFolder != null && viaFolder.Count > 0) return viaFolder;
 
             List<IShellItem> viaItems = null;
             Exception itemsError = null;
@@ -506,16 +526,26 @@ namespace FolderDiffCopy
             catch (Exception ex) { itemsError = ex; }
             if (viaItems != null && viaItems.Count > 0)
             {
-                ReleaseList(viaApp);
                 ReleaseList(viaFolder);
                 return viaItems;
             }
-            if (viaApp != null) return viaApp;
+
+            List<IShellItem> viaApp = null;
+            Exception appError = null;
+            try { viaApp = ChildrenByShellApp(folder); }
+            catch (Exception ex) { appError = ex; }
+            if (viaApp != null && viaApp.Count > 0)
+            {
+                ReleaseList(viaFolder);
+                ReleaseList(viaItems);
+                return viaApp;
+            }
             if (viaFolder != null) return viaFolder;
             if (viaItems != null) return viaItems;
-            if (appError != null) throw appError;
+            if (viaApp != null) return viaApp;
             if (folderError != null) throw folderError;
             if (itemsError != null) throw itemsError;
+            if (appError != null) throw appError;
             return new List<IShellItem>();
         }
 
@@ -532,12 +562,71 @@ namespace FolderDiffCopy
             {
                 object fi = ShellInvoke(items, "Item", i);
                 if (fi == null) continue;
-                string path = ShellGet(fi, "Path") as string;
+                string name = ShellGet(fi, "Name") as string;
                 IShellItem child = null;
-                if (!string.IsNullOrEmpty(path)) child = Open(path);
+                if (!string.IsNullOrEmpty(name)) child = RelativeChild(folder, name);
                 if (child != null) list.Add(child);
             }
             return list;
+        }
+
+        public static IShellItem RelativeChild(IShellItem parent, string name)
+        {
+            if (parent == null || string.IsNullOrEmpty(name)) return null;
+            IShellItem item = FromRelativeName(parent, name);
+            if (item != null) return item;
+            return FromFolderParse(parent, name);
+        }
+
+        static IShellItem FromRelativeName(IShellItem parent, string name)
+        {
+            try
+            {
+                Guid iid = typeof(IShellItem).GUID;
+                IShellItem item;
+                int hr = SHCreateItemFromRelativeName(parent, name, IntPtr.Zero, ref iid, out item);
+                if (hr >= 0 && item != null) return item;
+            }
+            catch
+            {
+            }
+            return null;
+        }
+
+        static IShellItem FromFolderParse(IShellItem parent, string name)
+        {
+            object raw = null;
+            IntPtr parentPidl = IntPtr.Zero;
+            IntPtr childPidl = IntPtr.Zero;
+            IntPtr abs = IntPtr.Zero;
+            try
+            {
+                parent.BindToHandler(IntPtr.Zero, ref BhidSfObject, ref IidShellFolder, out raw);
+                IShellFolder folder = (IShellFolder)raw;
+                uint eaten = 0;
+                uint attribs = 0;
+                folder.ParseDisplayName(GetDesktopWindow(), IntPtr.Zero, name, ref eaten, out childPidl, ref attribs);
+                if (childPidl == IntPtr.Zero) return null;
+                int hrPidl = SHGetIDListFromObject(parent, out parentPidl);
+                if (hrPidl < 0 || parentPidl == IntPtr.Zero) return null;
+                abs = ILCombine(parentPidl, childPidl);
+                if (abs == IntPtr.Zero) return null;
+                Guid iid = typeof(IShellItem).GUID;
+                IShellItem item;
+                int hr = SHCreateItemFromIDList(abs, ref iid, out item);
+                return hr >= 0 ? item : null;
+            }
+            catch
+            {
+                return null;
+            }
+            finally
+            {
+                if (childPidl != IntPtr.Zero) Marshal.FreeCoTaskMem(childPidl);
+                if (parentPidl != IntPtr.Zero) Marshal.FreeCoTaskMem(parentPidl);
+                if (abs != IntPtr.Zero) Marshal.FreeCoTaskMem(abs);
+                Release(raw);
+            }
         }
 
         static object ShellNameSpace(string path)
@@ -648,6 +737,8 @@ namespace FolderDiffCopy
 
         public static IShellItem FindChild(IShellItem folder, string name)
         {
+            IShellItem relative = RelativeChild(folder, name);
+            if (relative != null) return relative;
             List<IShellItem> children = Children(folder);
             IShellItem match = null;
             foreach (IShellItem child in children)
@@ -705,10 +796,13 @@ namespace FolderDiffCopy
             object ns = ShellNameSpace(tree.RootText);
             if (ns == null) ns = ShellNameSpace(tree.Root);
             if (ns == null) throw new PhoneException(PhoneErrors.CannotReach);
-            ScanShellFolder(ns, "", tree, files, dirs, countAsA, status);
+            IShellItem parent = tree.Live;
+            if (parent == null) parent = Open(tree.Root);
+            if (parent == null) parent = Open(tree.RootText);
+            ScanShellFolder(ns, "", parent, tree, files, dirs, countAsA, status);
         }
 
-        static void ScanShellFolder(object ns, string relDir, PhoneTree tree, Dictionary<string, PhoneEntry> files, HashSet<string> dirs, bool countAsA, ScanStatus status)
+        static void ScanShellFolder(object ns, string relDir, IShellItem parent, PhoneTree tree, Dictionary<string, PhoneEntry> files, HashSet<string> dirs, bool countAsA, ScanStatus status)
         {
             object items = ShellGet(ns, "Items");
             if (items == null) return;
@@ -725,27 +819,43 @@ namespace FolderDiffCopy
                 bool isFolder = false;
                 try { isFolder = Convert.ToBoolean(ShellGet(fi, "IsFolder")); }
                 catch { isFolder = false; }
+                IShellItem live = null;
+                if (parent != null) live = RelativeChild(parent, name);
                 if (isFolder)
                 {
-                    if (dirs.Contains(rel)) continue;
+                    if (dirs.Contains(rel))
+                    {
+                        if (live != null && !tree.Owns(live)) Release(live);
+                        continue;
+                    }
                     dirs.Add(rel);
                     if (!string.IsNullOrEmpty(path)) tree.SetDir(rel, path);
-                    object child = ShellNameSpace(path);
-                    if (child != null) ScanShellFolder(child, rel, tree, files, dirs, countAsA, status);
+                    if (live != null) tree.SetLive(rel, live);
+                    object child = null;
+                    if (!string.IsNullOrEmpty(path)) child = ShellNameSpace(path);
+                    if (child == null && live != null) child = ShellNameSpace(ParsingName(live));
+                    if (child != null) ScanShellFolder(child, rel, live, tree, files, dirs, countAsA, status);
                     continue;
                 }
                 if (name.EndsWith(PartSuffix, StringComparison.OrdinalIgnoreCase))
                 {
                     if (!string.IsNullOrEmpty(path)) tree.Leftovers.Add(path);
+                    if (live != null && !tree.Owns(live)) Release(live);
                     continue;
                 }
-                if (files.ContainsKey(rel)) continue;
+                if (files.ContainsKey(rel))
+                {
+                    if (live != null && !tree.Owns(live)) Release(live);
+                    continue;
+                }
                 PhoneEntry entry = new PhoneEntry();
                 try { entry.Size = Convert.ToInt64(ShellGet(fi, "Size")); }
                 catch { entry.Size = 0; }
                 if (entry.Size < 0) entry.Size = 0;
                 entry.Item = path;
+                entry.Live = live;
                 files[rel] = entry;
+                if (live != null) tree.SetLive(rel, live);
                 if (!string.IsNullOrEmpty(path)) tree.SetFile(rel, path);
                 if (countAsA) status.FilesA++;
                 else status.FilesB++;
@@ -767,48 +877,56 @@ namespace FolderDiffCopy
                 return;
             }
             var folders = new List<KeyValuePair<string, IShellItem>>();
-            try
+            foreach (IShellItem child in children)
             {
-                foreach (IShellItem child in children)
+                if (status.Cancel) return;
+                string name = FileName(child);
+                if (string.IsNullOrEmpty(name))
                 {
-                    if (status.Cancel) return;
-                    string name = FileName(child);
-                    if (string.IsNullOrEmpty(name)) continue;
-                    string rel = relDir.Length == 0 ? name : relDir + "\\" + name;
-                    string item = ParsingName(child);
-                    if (IsFolder(child))
-                    {
-                        if (dirs.Contains(rel)) continue;
-                        dirs.Add(rel);
-                        tree.SetDir(rel, item);
-                        folders.Add(new KeyValuePair<string, IShellItem>(rel, child));
-                        continue;
-                    }
-                    if (name.EndsWith(PartSuffix, StringComparison.OrdinalIgnoreCase))
-                    {
-                        tree.Leftovers.Add(item);
-                        continue;
-                    }
-                    if (files.ContainsKey(rel)) continue;
-                    PhoneEntry entry = new PhoneEntry();
-                    ReadMeta(child, out entry.Size, out entry.WriteTime);
-                    if (entry.Size < 0) entry.Size = 0;
-                    entry.Item = item;
-                    files[rel] = entry;
-                    tree.SetFile(rel, item);
-                    if (countAsA) status.FilesA++;
-                    else status.FilesB++;
-                }
-                foreach (KeyValuePair<string, IShellItem> pair in folders)
-                {
-                    if (status.Cancel) return;
-                    ScanFolder(pair.Value, pair.Key, tree, files, dirs, countAsA, status);
-                }
-            }
-            finally
-            {
-                foreach (IShellItem child in children)
                     Release(child);
+                    continue;
+                }
+                string rel = relDir.Length == 0 ? name : relDir + "\\" + name;
+                string item = ParsingName(child);
+                if (IsFolder(child))
+                {
+                    if (dirs.Contains(rel))
+                    {
+                        Release(child);
+                        continue;
+                    }
+                    dirs.Add(rel);
+                    tree.SetDir(rel, item);
+                    tree.SetLive(rel, child);
+                    folders.Add(new KeyValuePair<string, IShellItem>(rel, child));
+                    continue;
+                }
+                if (name.EndsWith(PartSuffix, StringComparison.OrdinalIgnoreCase))
+                {
+                    tree.Leftovers.Add(item);
+                    Release(child);
+                    continue;
+                }
+                if (files.ContainsKey(rel))
+                {
+                    Release(child);
+                    continue;
+                }
+                PhoneEntry entry = new PhoneEntry();
+                ReadMeta(child, out entry.Size, out entry.WriteTime);
+                if (entry.Size < 0) entry.Size = 0;
+                entry.Item = item;
+                entry.Live = child;
+                files[rel] = entry;
+                tree.SetFile(rel, item);
+                tree.SetLive(rel, child);
+                if (countAsA) status.FilesA++;
+                else status.FilesB++;
+            }
+            foreach (KeyValuePair<string, IShellItem> pair in folders)
+            {
+                if (status.Cancel) return;
+                ScanFolder(pair.Value, pair.Key, tree, files, dirs, countAsA, status);
             }
         }
 
@@ -827,12 +945,22 @@ namespace FolderDiffCopy
         // Opens a folder in the phone tree, creating it and any missing parents.
         public static IShellItem OpenDir(PhoneTree tree, string rel)
         {
-            if (string.IsNullOrEmpty(rel)) return OpenOrThrow(tree.Root);
+            IShellItem live = tree.GetLive(rel);
+            if (live != null) return live;
+            if (string.IsNullOrEmpty(rel))
+            {
+                if (tree.Live != null) return tree.Live;
+                return OpenOrThrow(tree.Root, tree.RootCookie, tree.RootText, tree.Live);
+            }
             string known = tree.DirItem(rel);
             if (known != null)
             {
                 IShellItem opened = Open(known);
-                if (opened != null) return opened;
+                if (opened != null)
+                {
+                    tree.SetLive(rel, opened);
+                    return opened;
+                }
             }
             int cut = rel.LastIndexOf('\\');
             string parentRel = cut < 0 ? "" : rel.Substring(0, cut);
@@ -844,6 +972,7 @@ namespace FolderDiffCopy
                 if (existing != null)
                 {
                     tree.SetDir(rel, ParsingName(existing));
+                    tree.SetLive(rel, existing);
                     return existing;
                 }
                 string created = NewFolder(parent, name);
@@ -851,16 +980,56 @@ namespace FolderDiffCopy
                 if (made == null) made = FolderChild(parent, name, rel);
                 if (made == null) throw new PhoneException("The phone did not create the folder " + rel + ".");
                 tree.SetDir(rel, ParsingName(made));
+                tree.SetLive(rel, made);
                 return made;
             }
             finally
             {
-                Release(parent);
+                if (!tree.Owns(parent)) Release(parent);
             }
         }
 
-        // Copies a file into a phone folder under newName. Returns the new item's parsing name.
-        public static string CopyInto(IShellItem source, IShellItem folder, string newName, Action<uint, uint> progress, Func<bool> cancelled)
+        public static IShellItem OpenFile(FileJob job)
+        {
+            if (job.PhoneLive != null) return job.PhoneLive;
+            if (job.PhoneFrom != null)
+            {
+                IShellItem live = job.PhoneFrom.GetLive(job.RelativePath);
+                if (live != null) return live;
+                live = Walk(job.PhoneFrom, job.RelativePath);
+                if (live != null)
+                {
+                    job.PhoneLive = live;
+                    return live;
+                }
+            }
+            IShellItem opened = Open(job.PhoneSource);
+            if (opened != null) return opened;
+            throw new PhoneException(PhoneErrors.CannotReach);
+        }
+
+        static IShellItem Walk(PhoneTree tree, string rel)
+        {
+            IShellItem current = tree.Live;
+            if (current == null) current = tree.GetLive("");
+            if (current == null || string.IsNullOrEmpty(rel)) return current;
+            string[] parts = rel.Split('\\');
+            string soFar = "";
+            for (int i = 0; i < parts.Length; i++)
+            {
+                soFar = i == 0 ? parts[0] : soFar + "\\" + parts[i];
+                IShellItem next = tree.GetLive(soFar);
+                if (next == null) next = RelativeChild(current, parts[i]);
+                if (next == null) next = FindChild(current, parts[i]);
+                if (next == null) return null;
+                tree.SetLive(soFar, next);
+                current = next;
+            }
+            return current;
+        }
+
+        // Copies a file into a folder under newName. Returns the new item's parsing name.
+        public static string CopyToFolder(IShellItem source, IShellItem folder, string newName, Action<uint, uint> progress, Func<bool> cancelled)
         {
             OperationSink sink = new OperationSink(progress, cancelled);
             IFileOperation op = NewOperation();
@@ -870,27 +1039,131 @@ namespace FolderDiffCopy
                 op.Advise(sink, out cookie);
                 op.CopyItem(source, folder, newName, null);
                 Perform(op, sink);
-                string made = sink.NewItem;
-                if (made == null)
-                {
-                    IShellItem found = FindChild(folder, newName);
-                    if (found != null)
-                    {
-                        try { made = ParsingName(found); }
-                        finally { Release(found); }
-                    }
-                }
-                if (made == null) throw new PhoneException("The phone did not keep the copied file.");
-                if (!HasName(made, newName))
-                {
-                    DeleteQuiet(made);
-                    throw new PhoneException("The phone saved the file under a different name than " + newName + ".");
-                }
-                return made;
+                if (!string.IsNullOrEmpty(sink.NewItem)) return sink.NewItem;
+                IShellItem found = FindChild(folder, newName);
+                if (found == null) return null;
+                try { return ParsingName(found); }
+                finally { Release(found); }
             }
             finally
             {
                 Finish(op, cookie);
+            }
+        }
+
+        // Copies a file into a phone folder under newName. Returns the new item's parsing name.
+        public static string CopyInto(IShellItem source, IShellItem folder, string newName, Action<uint, uint> progress, Func<bool> cancelled)
+        {
+            string made = CopyToFolder(source, folder, newName, progress, cancelled);
+            if (made == null) throw new PhoneException("The phone did not keep the copied file.");
+            if (!HasName(made, newName))
+            {
+                DeleteQuiet(made);
+                throw new PhoneException("The phone saved the file under a different name than " + newName + ".");
+            }
+            return made;
+        }
+
+        public static string FindOnDisk(string folder, string name)
+        {
+            if (string.IsNullOrEmpty(folder) || string.IsNullOrEmpty(name)) return null;
+            string exact = Path.Combine(folder, name);
+            if (Native.FileExists(Native.ToExtended(exact))) return exact;
+            try
+            {
+                string[] files = Directory.GetFiles(folder);
+                if (files.Length == 1) return files[0];
+                for (int i = 0; i < files.Length; i++)
+                {
+                    if (string.Equals(Path.GetFileName(files[i]), name, StringComparison.OrdinalIgnoreCase))
+                        return files[i];
+                }
+            }
+            catch
+            {
+            }
+            return null;
+        }
+
+        public static void CopyHereToFolder(IShellItem source, string destFolder, string destName, long expectedSize, Func<bool> cancelled)
+        {
+            if (source == null) throw new PhoneException(PhoneErrors.CannotReach);
+            IShellItem parent = null;
+            try
+            {
+                try { source.GetParent(out parent); }
+                catch { parent = null; }
+                string parentPath = null;
+                if (parent != null)
+                {
+                    parentPath = ParsingName(parent);
+                    if (string.IsNullOrEmpty(parentPath)) parentPath = EditingName(parent);
+                }
+                object srcNs = ShellNameSpace(parentPath);
+                object payload = null;
+                string srcName = FileName(source);
+                if (srcNs != null && !string.IsNullOrEmpty(srcName))
+                    payload = ShellInvoke(srcNs, "ParseName", srcName);
+                if (payload == null)
+                {
+                    string parsing = ParsingName(source);
+                    if (!string.IsNullOrEmpty(parsing)) payload = parsing;
+                }
+                if (payload == null) throw new PhoneException(PhoneErrors.CannotReach);
+                object destNs = ShellNameSpace(destFolder);
+                if (destNs == null) throw new IOException("Could not open " + destFolder + ".");
+                ShellInvoke(destNs, "CopyHere", payload, 4 | 16 | 512 | 1024);
+                WaitForIncoming(destFolder, destName, srcName, expectedSize, cancelled);
+            }
+            finally
+            {
+                Release(parent);
+            }
+        }
+
+        static void WaitForIncoming(string folder, string destName, string srcName, long expectedSize, Func<bool> cancelled)
+        {
+            int stable = 0;
+            int missing = 0;
+            long last = -1;
+            while (true)
+            {
+                if (cancelled != null && cancelled()) throw new OperationCanceledException();
+                string found = FindOnDisk(folder, destName);
+                if (found == null && !string.IsNullOrEmpty(srcName)
+                    && !string.Equals(srcName, destName, StringComparison.OrdinalIgnoreCase))
+                    found = FindOnDisk(folder, srcName);
+                if (found != null)
+                {
+                    missing = 0;
+                    long len = 0;
+                    try { len = new FileInfo(found).Length; }
+                    catch { len = 0; }
+                    if (expectedSize > 0 && len >= expectedSize) return;
+                    if (len == last)
+                    {
+                        stable++;
+                        if (expectedSize > 0)
+                        {
+                            if (stable >= 300 && len > 0)
+                                throw new PhoneException(PhoneErrors.Unplugged);
+                        }
+                        else if (stable >= 20)
+                            return;
+                    }
+                    else
+                    {
+                        stable = 0;
+                        last = len;
+                    }
+                }
+                else
+                {
+                    missing++;
+                    if (missing > 6000)
+                        throw new PhoneException("The phone copy did not finish.");
+                }
+                Thread.Sleep(100);
             }
         }
 
@@ -1025,6 +1298,14 @@ namespace FolderDiffCopy
         [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
         static extern int SHCreateItemFromParsingName(
             string path,
+            IntPtr bind,
+            ref Guid iid,
+            [MarshalAs(UnmanagedType.Interface)] out IShellItem item);
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+        static extern int SHCreateItemFromRelativeName(
+            [MarshalAs(UnmanagedType.Interface)] IShellItem parent,
+            string name,
             IntPtr bind,
             ref Guid iid,
             [MarshalAs(UnmanagedType.Interface)] out IShellItem item);
@@ -1310,6 +1591,8 @@ namespace FolderDiffCopy
             {
                 PhoneEntry entry = fromFiles[copy.Rel];
                 job.PhoneSource = entry.Item;
+                job.PhoneLive = entry.Live;
+                job.PhoneFrom = fromTree;
                 job.PhoneTime = entry.WriteTime;
                 job.SourcePath = from.Text + "\\" + copy.Rel;
             }
@@ -1398,7 +1681,10 @@ namespace FolderDiffCopy
                 try
                 {
                     if (destTree != null)
-                        PhoneShell.Release(PhoneShell.OpenDir(destTree, dir));
+                    {
+                        IShellItem made = PhoneShell.OpenDir(destTree, dir);
+                        if (!destTree.Owns(made)) PhoneShell.Release(made);
+                    }
                     else
                         Native.EnsureDirectory(Native.ToExtended(Diff.Join(destRoot, dir)));
                     result.DirsCreated++;
@@ -1434,21 +1720,22 @@ namespace FolderDiffCopy
             return CopyToPhone(job);
         }
 
-        // Phone to PC: read the phone file into '<name>.fdc-partial' on the PC, give it the
-        // phone's modified time, then rename it into place.
+        // Phone to PC: copy into a temp folder with Explorer's file operation (MTP
+        // usually has no usable stream), then rename into place.
         CopyOutcome CopyFromPhone(FileJob job)
         {
-            string temp = job.DestPath + ".fdc-partial";
+            string destPretty = Native.Pretty(job.DestPath);
+            string parentPretty = Native.Pretty(Native.Parent(job.DestPath));
+            string destName = Path.GetFileName(destPretty);
+            string tempDir = Path.Combine(parentPretty, destName + ".fdc-dir");
             bool committed = false;
             IShellItem item = null;
-            ComStream stream = null;
-            FileStream output = null;
-            IntPtr readCount = Marshal.AllocCoTaskMem(4);
+            IShellItem destFolder = null;
             try
             {
-                Native.EnsureDirectory(Native.Parent(temp));
+                Native.EnsureDirectory(Native.ToExtended(parentPretty));
                 if (cancel) return CopyOutcome.Cancelled;
-                item = PhoneShell.OpenOrThrow(job.PhoneSource);
+                item = PhoneShell.OpenFile(job);
                 long size;
                 long time;
                 PhoneShell.ReadMeta(item, out size, out time);
@@ -1458,43 +1745,54 @@ namespace FolderDiffCopy
                     job.Size = size;
                 }
                 if (time != 0) job.PhoneTime = time;
-                stream = PhoneShell.OpenStream(item);
-                Native.DeleteQuiet(temp);
-                output = Native.OpenForWrite(temp);
-                byte[] buffer = new byte[256 * 1024];
-                long written = 0;
-                while (true)
+                DeleteTreeQuiet(tempDir);
+                Native.EnsureDirectory(Native.ToExtended(tempDir));
+                destFolder = PhoneShell.Open(tempDir);
+                if (destFolder == null)
+                    throw new IOException("Could not open " + tempDir + ".");
+                Action<uint, uint> progress = delegate(uint total, uint soFar) { Report(job, total, soFar); };
+                Func<bool> stopping = delegate { return cancel; };
+                Exception copyError = null;
+                try
                 {
-                    if (cancel) return CopyOutcome.Cancelled;
-                    Marshal.WriteInt32(readCount, 0);
-                    stream.Read(buffer, buffer.Length, readCount);
-                    int n = Marshal.ReadInt32(readCount);
-                    if (n <= 0) break;
-                    output.Write(buffer, 0, n);
-                    written += n;
-                    Interlocked.Exchange(ref job.Copied, written);
-                    Interlocked.Add(ref copiedBytes, n);
-                    int pause = TestPauseMs;
-                    if (pause > 0) Thread.Sleep(pause);
+                    PhoneShell.CopyToFolder(item, destFolder, destName, progress, stopping);
                 }
+                catch (Exception ex)
+                {
+                    copyError = ex;
+                }
+                PhoneShell.Release(destFolder);
+                destFolder = null;
                 if (cancel) return CopyOutcome.Cancelled;
-                if (job.Size > 0 && written < job.Size)
-                    throw new PhoneException(PhoneErrors.Unplugged);
+                string found = PhoneShell.FindOnDisk(tempDir, destName);
+                if (found == null)
+                {
+                    DeleteTreeQuiet(tempDir);
+                    Native.EnsureDirectory(Native.ToExtended(tempDir));
+                    try
+                    {
+                        PhoneShell.CopyHereToFolder(item, tempDir, destName, job.Size, stopping);
+                    }
+                    catch (Exception ex)
+                    {
+                        if (copyError == null) copyError = ex;
+                    }
+                    if (cancel) return CopyOutcome.Cancelled;
+                    found = PhoneShell.FindOnDisk(tempDir, destName);
+                }
+                if (found == null)
+                {
+                    if (copyError != null) throw copyError;
+                    throw new PhoneException("The phone file did not arrive on this PC.");
+                }
                 if (job.PhoneTime != 0)
                 {
-                    FileTime when = new FileTime();
-                    when.Low = (uint)(job.PhoneTime & 0xFFFFFFFFL);
-                    when.High = (uint)((ulong)job.PhoneTime >> 32);
-                    if (!Native.ApplyTimes(output.SafeFileHandle, when, when, when))
-                        throw new IOException("Could not keep the modified time of " + job.RelativePath + ".");
+                    try { File.SetLastWriteTimeUtc(found, DateTime.FromFileTimeUtc(job.PhoneTime)); }
+                    catch { }
                 }
-                output.Flush();
-                output.Dispose();
-                output = null;
-                Marshal.ReleaseComObject(stream);
-                stream = null;
-                Native.MoveReplace(temp, job.DestPath);
+                Native.MoveReplace(Native.ToExtended(found), job.DestPath);
                 committed = true;
+                Complete(job);
                 return CopyOutcome.Success;
             }
             catch (Exception ex)
@@ -1505,18 +1803,28 @@ namespace FolderDiffCopy
             }
             finally
             {
-                try { if (output != null) output.Dispose(); }
-                catch { }
-                PhoneShell.Release(stream);
-                PhoneShell.Release(item);
-                Marshal.FreeCoTaskMem(readCount);
+                PhoneShell.Release(destFolder);
+                if (item != job.PhoneLive && (job.PhoneFrom == null || !job.PhoneFrom.Owns(item)))
+                    PhoneShell.Release(item);
+                DeleteTreeQuiet(tempDir);
                 if (!committed)
                 {
                     long partial = Interlocked.Exchange(ref job.Copied, 0);
                     if (partial != 0)
                         Interlocked.Add(ref copiedBytes, -partial);
-                    Native.DeleteQuiet(temp);
                 }
+            }
+        }
+
+        static void DeleteTreeQuiet(string dir)
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(dir) && Native.DirExists(Native.ToExtended(dir)))
+                    Directory.Delete(dir, true);
+            }
+            catch
+            {
             }
         }
 
