@@ -116,6 +116,11 @@ namespace FolderDiffCopy
             return false;
         }
 
+        public void ForgetLiveItems()
+        {
+            liveItems.Clear();
+        }
+
         public void SetFile(string rel, string item)
         {
             lock (Gate)
@@ -148,7 +153,7 @@ namespace FolderDiffCopy
 
     internal static class PhoneErrors
     {
-        public const string CannotReach = "Windows can see the phone, but that folder could not be opened. Unplug the phone, plug it back in, pick the folder again, then press Preview.";
+        public const string CannotReach = "That phone folder could not be opened. Plug the phone in, unlock it, pick the folder again with Browse, then press Preview.";
         public const string Unplugged = "The phone was unplugged or stopped responding. Plug it back in, unlock it, and run the copy again. Unfinished files are cleaned up on the next run.";
         public const string Locked = "The phone refused access. Unlock the phone, make sure its USB mode is File transfer, and try again.";
         public const string Full = "The phone is out of space.";
@@ -439,12 +444,52 @@ namespace FolderDiffCopy
 
         public static IShellItem OpenOrThrow(string parsingName, uint cookie, string displayText, IShellItem live)
         {
-            if (live != null) return live;
+            if (Alive(live)) return live;
             IShellItem item = FromCookie(cookie);
             if (item == null) item = Open(parsingName);
             if (item == null) item = Open(displayText);
             if (item == null) throw new PhoneException(PhoneErrors.CannotReach);
             return item;
+        }
+
+        public static bool Alive(IShellItem item)
+        {
+            if (item == null) return false;
+            try
+            {
+                uint attributes;
+                item.GetAttributes(0, out attributes);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static void DropDead(FolderSpot spot)
+        {
+            if (spot == null) return;
+            if (spot.Live != null && !Alive(spot.Live))
+            {
+                spot.Live = null;
+                if (spot.GitCookie != 0)
+                {
+                    try { GitTable().RevokeInterfaceFromGlobal(spot.GitCookie); }
+                    catch { }
+                    spot.GitCookie = 0;
+                }
+            }
+        }
+
+        public static void DropDead(PhoneTree tree)
+        {
+            if (tree == null) return;
+            if (tree.Live != null && !Alive(tree.Live))
+            {
+                tree.Live = null;
+                lock (tree.Gate) tree.ForgetLiveItems();
+            }
         }
 
         public static void Release(object item)
@@ -769,14 +814,14 @@ namespace FolderDiffCopy
         // and never treated as real files.
         public static void Scan(PhoneTree tree, Dictionary<string, PhoneEntry> files, HashSet<string> dirs, bool countAsA, ScanStatus status)
         {
+            DropDead(tree);
             IShellItem root = tree.Live;
-            bool own = false;
             if (root == null)
             {
                 try
                 {
                     root = OpenOrThrow(tree.Root, tree.RootCookie, tree.RootText, null);
-                    own = true;
+                    tree.Live = root;
                 }
                 catch (Exception)
                 {
@@ -789,9 +834,9 @@ namespace FolderDiffCopy
                 {
                     ScanFolder(root, "", tree, files, dirs, countAsA, status);
                 }
-                finally
+                catch (Exception)
                 {
-                    if (own) Release(root);
+                    DropDead(tree);
                 }
                 if (files.Count > 0 || dirs.Count > 0 || status.Cancel) return;
             }
@@ -800,13 +845,118 @@ namespace FolderDiffCopy
 
         static void ScanByDisplayName(PhoneTree tree, Dictionary<string, PhoneEntry> files, HashSet<string> dirs, bool countAsA, ScanStatus status)
         {
-            object ns = ShellNameSpace(tree.RootText);
-            if (ns == null) ns = ShellNameSpace(tree.Root);
+            object ns = FindPhoneNamespace(tree.Root, tree.RootText);
             if (ns == null) throw new PhoneException(PhoneErrors.CannotReach);
-            IShellItem parent = tree.Live;
+            IShellItem parent = Alive(tree.Live) ? tree.Live : null;
             if (parent == null) parent = Open(tree.Root);
             if (parent == null) parent = Open(tree.RootText);
             ScanShellFolder(ns, "", parent, tree, files, dirs, countAsA, status);
+        }
+
+        static object FindPhoneNamespace(string root, string rootText)
+        {
+            object ns = ShellNameSpace(rootText);
+            if (ns != null) return ns;
+            ns = ShellNameSpace(root);
+            if (ns != null) return ns;
+            return WalkFromThisPc(rootText);
+        }
+
+        static object ShellNameSpaceById(int id)
+        {
+            Type type = Type.GetTypeFromProgID("Shell.Application");
+            if (type == null) return null;
+            object shell = Activator.CreateInstance(type);
+            try
+            {
+                return type.InvokeMember("NameSpace", BindingFlags.InvokeMethod, null, shell, new object[] { id });
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        static string[] SplitShellPath(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return new string[0];
+            return text.Split(new char[] { '\\' }, StringSplitOptions.RemoveEmptyEntries);
+        }
+
+        static bool IsThisPcName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            if (string.Equals(name, "This PC", StringComparison.OrdinalIgnoreCase)) return true;
+            if (string.Equals(name, "Computer", StringComparison.OrdinalIgnoreCase)) return true;
+            if (string.Equals(name, "My Computer", StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        static object FolderOf(object folderItem)
+        {
+            if (folderItem == null) return null;
+            try
+            {
+                object folder = ShellGet(folderItem, "GetFolder");
+                if (folder != null) return folder;
+            }
+            catch
+            {
+            }
+            try
+            {
+                string path = ShellGet(folderItem, "Path") as string;
+                if (!string.IsNullOrEmpty(path)) return ShellNameSpace(path);
+            }
+            catch
+            {
+            }
+            return null;
+        }
+
+        static object WalkParts(object ns, string[] parts, int start)
+        {
+            object current = ns;
+            if (current == null || parts == null) return null;
+            for (int i = start; i < parts.Length; i++)
+            {
+                object childItem = null;
+                try { childItem = ShellInvoke(current, "ParseName", parts[i]); }
+                catch { childItem = null; }
+                if (childItem == null) return null;
+                current = FolderOf(childItem);
+                if (current == null) return null;
+            }
+            return current;
+        }
+
+        static object WalkFromThisPc(string text)
+        {
+            object thisPc = ShellNameSpaceById(0x11);
+            if (thisPc == null) return null;
+            string[] parts = SplitShellPath(text);
+            int start = 0;
+            if (parts.Length > 0 && IsThisPcName(parts[0])) start = 1;
+            object found = WalkParts(thisPc, parts, start);
+            if (found != null) return found;
+            object items = null;
+            try { items = ShellGet(thisPc, "Items"); }
+            catch { items = null; }
+            if (items == null) return null;
+            int count = 0;
+            try { count = Convert.ToInt32(ShellGet(items, "Count")); }
+            catch { return null; }
+            for (int i = 0; i < count; i++)
+            {
+                object fi = null;
+                try { fi = ShellInvoke(items, "Item", i); }
+                catch { fi = null; }
+                object folder = FolderOf(fi);
+                if (folder == null) continue;
+                found = WalkParts(folder, parts, start);
+                if (found != null) return found;
+            }
+            return null;
         }
 
         static void ScanShellFolder(object ns, string relDir, IShellItem parent, PhoneTree tree, Dictionary<string, PhoneEntry> files, HashSet<string> dirs, bool countAsA, ScanStatus status)
@@ -956,8 +1106,11 @@ namespace FolderDiffCopy
             if (live != null) return live;
             if (string.IsNullOrEmpty(rel))
             {
-                if (tree.Live != null) return tree.Live;
-                return OpenOrThrow(tree.Root, tree.RootCookie, tree.RootText, tree.Live);
+                if (Alive(tree.Live)) return tree.Live;
+                tree.Live = null;
+                IShellItem opened = OpenOrThrow(tree.Root, tree.RootCookie, tree.RootText, null);
+                tree.Live = opened;
+                return opened;
             }
             string known = tree.DirItem(rel);
             if (known != null)
@@ -1638,6 +1791,7 @@ namespace FolderDiffCopy
 
         static PhoneTree NewTree(FolderSpot spot)
         {
+            PhoneShell.DropDead(spot);
             PhoneTree tree = new PhoneTree();
             tree.Root = spot.PhoneItem;
             tree.RootText = spot.Text;

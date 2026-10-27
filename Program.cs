@@ -89,6 +89,7 @@ namespace FolderDiffCopy
                 failed += Check(log, "phone part file is renamed", delegate { TestPhonePartRename(root); });
                 failed += Check(log, "phone real name is only kept when it is the new copy", delegate { TestPhoneNewCopyRules(); });
                 failed += Check(log, "phone folder file probe", delegate { TestPhoneProbeFile(root); });
+                failed += Check(log, "phone shell item alive check", delegate { TestPhoneAlive(); });
             }
             finally
             {
@@ -775,6 +776,29 @@ namespace FolderDiffCopy
                 }
             });
             Need(File.ReadAllText(Path.Combine(destDir, "out.txt")) == "probe-new-copy", "probe copy contents");
+        }
+
+        static void TestPhoneAlive()
+        {
+            Need(!PhoneShell.Alive(null), "null item was treated as alive");
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            PhoneShell.RunSta(delegate
+            {
+                IShellItem item = PhoneShell.Open(windows);
+                Need(item != null, "could not open Windows folder");
+                try
+                {
+                    Need(PhoneShell.Alive(item), "Windows folder was not alive");
+                    FolderSpot spot = FolderSpot.ForPhone("windows", windows, 0);
+                    spot.Live = item;
+                    PhoneShell.DropDead(spot);
+                    Need(spot.Live != null, "a live folder was dropped");
+                }
+                finally
+                {
+                    PhoneShell.Release(item);
+                }
+            });
         }
 
         static int RunPhoneProbe()

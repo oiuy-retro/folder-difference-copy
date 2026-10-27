@@ -895,6 +895,8 @@ namespace FolderDiffCopy
             if (IsDisposed) return;
             if (error != null)
             {
+                PhoneShell.DropDead(phoneA);
+                PhoneShell.DropDead(phoneB);
                 previewOnly = false;
                 previewedA = null;
                 previewedB = null;
