@@ -76,6 +76,7 @@ namespace FolderDiffCopy
                 failed += Check(log, "phone compare by size", delegate { TestPhonePlan(); });
                 failed += Check(log, "phone folder names", delegate { TestPhoneNames(); });
                 failed += Check(log, "phone copy is one at a time", delegate { TestPhoneOneAtATime(); });
+                failed += Check(log, "phone path is not a disk folder", delegate { TestPhonePathNotDisk(); });
             }
             finally
             {
@@ -563,6 +564,20 @@ namespace FolderDiffCopy
             Need(!PhoneShell.IsPhoneDevice(folder), "folder taken for the device");
             Need(!PhoneShell.IsPhoneItem(@"::{031E4825-7B94-4DC3-B131-E946B44C8DD5}\Documents.library-ms"), "library taken for a phone");
             Need(!PhoneShell.IsPhoneItem(@"C:\Music"), "drive folder taken for a phone");
+            Need(PhoneShell.IsThisPcOrPortableDevices("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"), "This PC not recognized");
+            Need(PhoneShell.IsThisPcOrPortableDevices("::{35786D3C-B075-49B9-88DD-029876E11C01}"), "portable devices folder not recognized");
+            Need(!PhoneShell.IsThisPcOrPortableDevices(device), "phone device taken for This PC");
+        }
+
+        static void TestPhonePathNotDisk()
+        {
+            Need(PhoneShell.UseAsDiskFolder(Environment.GetFolderPath(Environment.SpecialFolder.Windows)), "Windows folder should count as a disk folder");
+            Need(!PhoneShell.UseAsDiskFolder(null), "null counted as a disk folder");
+            Need(!PhoneShell.UseAsDiskFolder(""), "empty counted as a disk folder");
+            Need(!PhoneShell.UseAsDiskFolder(@"\\?\usb#vid_18d1&pid_4ee1#missing#{6ac27878-a6fa-4155-ba85-f98f491d4f33}"), "missing phone path counted as a disk folder");
+            Need(!PhoneShell.UseAsDiskFolder(@"This PC\Phone\Internal shared storage"), "phone display name counted as a disk folder");
+            Paths.Normalize("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}");
+            Paths.Normalize(@"This PC\Phone\Internal shared storage");
         }
 
         static void TestPhoneOneAtATime()

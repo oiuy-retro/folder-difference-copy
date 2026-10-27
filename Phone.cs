@@ -154,15 +154,23 @@ namespace FolderDiffCopy
         const uint SigdnNormalDisplay = 0;
         const uint SfgaoFolder = 0x20000000;
         const uint SfgaoStream = 0x00400000;
+        const uint SfgaoFileSystem = 0x40000000;
+        const int ShcontfFolders = 0x20;
+        const int ShcontfNonFolders = 0x40;
+        const int ShcontfIncludeHidden = 0x80;
+        const int ShcontfStorage = 0x800;
+        const string ThisPcFolder = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
         const uint FofNoUi = 0x4 | 0x10 | 0x200 | 0x400;
         const uint FofxEarlyFailure = 0x00100000;
         const uint FileAttributeDirectory = 0x10;
         const int SFalse = 1;
 
         static Guid BhidEnumItems = new Guid("94f60519-2850-4924-aa5a-d15e84868039");
+        static Guid BhidSfObject = new Guid("3981e224-f559-11d3-8e3a-00c04f6837d5");
         static Guid BhidStream = new Guid("1cebb3ab-7c10-499a-a417-92ca16c4cb83");
         static Guid IidStream = new Guid("0000000c-0000-0000-C000-000000000046");
         static Guid IidEnumShellItems = new Guid("70629033-e363-4a28-a567-0db78006e6d7");
+        static Guid IidShellFolder = new Guid("000214E6-0000-0000-C000-000000000046");
         static PropertyKey KeySize = new PropertyKey(new Guid("B725F130-47EF-101A-A5F1-02608C9EEBAC"), 12);
         static PropertyKey KeyModified = new PropertyKey(new Guid("B725F130-47EF-101A-A5F1-02608C9EEBAC"), 14);
         static PropertyKey KeyFileName = new PropertyKey(new Guid("41CF5AE0-F75A-4806-BD87-59C7D9248EB9"), 100);
@@ -171,7 +179,7 @@ namespace FolderDiffCopy
         {
             if (string.IsNullOrEmpty(parsingName)) return false;
             if (parsingName.IndexOf(WpdInterface, StringComparison.OrdinalIgnoreCase) >= 0) return true;
-            return parsingName.StartsWith(PortableDevicesFolder, StringComparison.OrdinalIgnoreCase);
+            return StartsWithGuid(parsingName, PortableDevicesFolder);
         }
 
         // The phone itself (its children are storages such as "Internal shared storage")
@@ -181,9 +189,42 @@ namespace FolderDiffCopy
             if (string.IsNullOrEmpty(parsingName)) return false;
             int at = parsingName.IndexOf(WpdInterface, StringComparison.OrdinalIgnoreCase);
             if (at < 0)
-                return parsingName.TrimEnd('\\').Equals(PortableDevicesFolder, StringComparison.OrdinalIgnoreCase);
+                return EqualsGuid(parsingName, PortableDevicesFolder);
             string rest = parsingName.Substring(at + WpdInterface.Length).Trim('\\');
             return rest.Length == 0;
+        }
+
+        // A filesystem display name from the shell is only a disk folder when that
+        // directory actually exists. Phones often report a path that cannot be opened.
+        public static bool UseAsDiskFolder(string fileSystemPath)
+        {
+            return !string.IsNullOrEmpty(fileSystemPath) && Paths.Exists(fileSystemPath);
+        }
+
+        public static bool IsThisPcOrPortableDevices(string parsingName)
+        {
+            return EqualsGuid(parsingName, ThisPcFolder) || EqualsGuid(parsingName, PortableDevicesFolder);
+        }
+
+        static string StripShellPrefix(string parsingName)
+        {
+            if (string.IsNullOrEmpty(parsingName)) return "";
+            string t = parsingName.Trim();
+            if (t.StartsWith("shell:", StringComparison.OrdinalIgnoreCase))
+                t = t.Substring(6);
+            return t.TrimEnd('\\');
+        }
+
+        static bool EqualsGuid(string parsingName, string guid)
+        {
+            return StripShellPrefix(parsingName).Equals(guid, StringComparison.OrdinalIgnoreCase);
+        }
+
+        static bool StartsWithGuid(string parsingName, string guid)
+        {
+            string t = StripShellPrefix(parsingName);
+            if (t.Equals(guid, StringComparison.OrdinalIgnoreCase)) return true;
+            return t.StartsWith(guid + "\\", StringComparison.OrdinalIgnoreCase);
         }
 
         // Runs work on its own single-threaded apartment thread, which the shell's
@@ -258,8 +299,8 @@ namespace FolderDiffCopy
         public static bool IsFolder(IShellItem item)
         {
             uint attributes;
-            item.GetAttributes(SfgaoFolder | SfgaoStream, out attributes);
-            return (attributes & SfgaoFolder) != 0 && (attributes & SfgaoStream) == 0;
+            item.GetAttributes(SfgaoFolder, out attributes);
+            return (attributes & SfgaoFolder) != 0;
         }
 
         // The real file name, extension included, even when Explorer hides extensions.
@@ -301,6 +342,36 @@ namespace FolderDiffCopy
 
         public static List<IShellItem> Children(IShellItem folder)
         {
+            List<IShellItem> viaFolder = null;
+            Exception folderError = null;
+            try { viaFolder = ChildrenByShellFolder(folder); }
+            catch (Exception ex) { folderError = ex; }
+            if (viaFolder != null && viaFolder.Count > 0) return viaFolder;
+
+            List<IShellItem> viaItems = null;
+            Exception itemsError = null;
+            try { viaItems = ChildrenByEnumItems(folder); }
+            catch (Exception ex) { itemsError = ex; }
+            if (viaItems != null && viaItems.Count > 0)
+            {
+                ReleaseList(viaFolder);
+                return viaItems;
+            }
+            if (viaFolder != null) return viaFolder;
+            if (viaItems != null) return viaItems;
+            if (folderError != null) throw folderError;
+            if (itemsError != null) throw itemsError;
+            return new List<IShellItem>();
+        }
+
+        static void ReleaseList(List<IShellItem> list)
+        {
+            if (list == null) return;
+            foreach (IShellItem item in list) Release(item);
+        }
+
+        static List<IShellItem> ChildrenByEnumItems(IShellItem folder)
+        {
             var list = new List<IShellItem>();
             object found;
             folder.BindToHandler(IntPtr.Zero, ref BhidEnumItems, ref IidEnumShellItems, out found);
@@ -320,6 +391,55 @@ namespace FolderDiffCopy
             finally
             {
                 Release(items);
+            }
+            return list;
+        }
+
+        // Phones need SHCONTF_STORAGE. BHID_EnumItems often returns no children on MTP.
+        static List<IShellItem> ChildrenByShellFolder(IShellItem folder)
+        {
+            var list = new List<IShellItem>();
+            object raw;
+            folder.BindToHandler(IntPtr.Zero, ref BhidSfObject, ref IidShellFolder, out raw);
+            IShellFolder shellFolder = (IShellFolder)raw;
+            IEnumIDList enumerator = null;
+            IntPtr parentPidl = IntPtr.Zero;
+            try
+            {
+                int flags = ShcontfFolders | ShcontfNonFolders | ShcontfIncludeHidden | ShcontfStorage;
+                int hrEnum = shellFolder.EnumObjects(IntPtr.Zero, flags, out enumerator);
+                if (hrEnum < 0) Marshal.ThrowExceptionForHR(hrEnum);
+                if (enumerator == null) return list;
+                int hrPidl = SHGetIDListFromObject(folder, out parentPidl);
+                if (hrPidl < 0 || parentPidl == IntPtr.Zero) Marshal.ThrowExceptionForHR(hrPidl);
+                Guid iid = typeof(IShellItem).GUID;
+                for (;;)
+                {
+                    IntPtr childPidl;
+                    uint fetched;
+                    int hr = enumerator.Next(1, out childPidl, out fetched);
+                    if (hr < 0) Marshal.ThrowExceptionForHR(hr);
+                    if (hr == SFalse || fetched == 0 || childPidl == IntPtr.Zero) break;
+                    IntPtr abs = ILCombine(parentPidl, childPidl);
+                    Marshal.FreeCoTaskMem(childPidl);
+                    if (abs == IntPtr.Zero) continue;
+                    try
+                    {
+                        IShellItem child;
+                        int hrItem = SHCreateItemFromIDList(abs, ref iid, out child);
+                        if (hrItem == 0 && child != null) list.Add(child);
+                    }
+                    finally
+                    {
+                        Marshal.FreeCoTaskMem(abs);
+                    }
+                }
+            }
+            finally
+            {
+                if (parentPidl != IntPtr.Zero) Marshal.FreeCoTaskMem(parentPidl);
+                Release(enumerator);
+                Release(shellFolder);
             }
             return list;
         }
@@ -635,6 +755,20 @@ namespace FolderDiffCopy
         static extern int SHCreateItemFromParsingName(
             string path,
             IntPtr bind,
+            ref Guid iid,
+            [MarshalAs(UnmanagedType.Interface)] out IShellItem item);
+
+        [DllImport("shell32.dll", PreserveSig = true)]
+        static extern int SHGetIDListFromObject(
+            [MarshalAs(UnmanagedType.IUnknown)] object punk,
+            out IntPtr pidl);
+
+        [DllImport("shell32.dll")]
+        static extern IntPtr ILCombine(IntPtr pidl1, IntPtr pidl2);
+
+        [DllImport("shell32.dll", PreserveSig = true)]
+        static extern int SHCreateItemFromIDList(
+            IntPtr pidl,
             ref Guid iid,
             [MarshalAs(UnmanagedType.Interface)] out IShellItem item);
     }
@@ -1236,6 +1370,34 @@ namespace FolderDiffCopy
         [PreserveSig] int Skip(uint count);
         [PreserveSig] int Reset();
         [PreserveSig] int Clone(out IEnumShellItems copy);
+    }
+
+    [ComImport]
+    [Guid("000214E6-0000-0000-C000-000000000046")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IShellFolder
+    {
+        void ParseDisplayName(IntPtr hwnd, IntPtr bind, [MarshalAs(UnmanagedType.LPWStr)] string name, ref uint eaten, out IntPtr pidl, ref uint attributes);
+        [PreserveSig] int EnumObjects(IntPtr hwnd, int flags, out IEnumIDList list);
+        void BindToObject(IntPtr pidl, IntPtr bind, ref Guid iid, out IntPtr ppv);
+        void BindToStorage(IntPtr pidl, IntPtr bind, ref Guid iid, out IntPtr ppv);
+        [PreserveSig] int CompareIDs(IntPtr lparam, IntPtr pidl1, IntPtr pidl2);
+        void CreateViewObject(IntPtr hwndOwner, ref Guid iid, out IntPtr ppv);
+        void GetAttributesOf(uint count, IntPtr pidl, ref uint attributes);
+        void GetUIObjectOf(IntPtr hwndOwner, uint count, IntPtr pidl, ref Guid iid, IntPtr reserved, out IntPtr ppv);
+        void GetDisplayNameOf(IntPtr pidl, uint flags, IntPtr name);
+        void SetNameOf(IntPtr hwnd, IntPtr pidl, [MarshalAs(UnmanagedType.LPWStr)] string name, uint flags, out IntPtr pidlOut);
+    }
+
+    [ComImport]
+    [Guid("000214F2-0000-0000-C000-000000000046")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IEnumIDList
+    {
+        [PreserveSig] int Next(uint count, out IntPtr pidl, out uint fetched);
+        [PreserveSig] int Skip(uint count);
+        [PreserveSig] int Reset();
+        [PreserveSig] int Clone(out IEnumIDList copy);
     }
 
     [ComImport]

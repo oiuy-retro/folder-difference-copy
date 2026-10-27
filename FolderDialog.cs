@@ -8,12 +8,16 @@ namespace FolderDiffCopy
     {
         const uint FosNoChangeDir = 0x8;
         const uint FosPickFolders = 0x20;
+        const uint FosForceFileSystem = 0x40;
         const uint FosAllNonStorageItems = 0x80;
+        const uint FosNoValidate = 0x100;
         const uint FosPathMustExist = 0x800;
+        const uint FosFileMustExist = 0x1000;
         const uint SigdnFileSystemPath = 0x80058000;
         const uint SigdnDesktopAbsoluteParsing = 0x80028000;
         const uint SigdnDesktopAbsoluteEditing = 0x8004C000;
         const uint SfgaoFolder = 0x20000000;
+        const uint SfgaoFileSystem = 0x40000000;
         const string NotAFolder = "That place is not a folder on a drive or a phone. Pick a regular folder, or a folder on a connected phone.";
         const string PhoneItself = "Pick a folder inside the phone's storage, such as Internal shared storage, not the phone itself.";
         const int Cancelled = unchecked((int)0x800704C7);
@@ -25,7 +29,7 @@ namespace FolderDiffCopy
             {
                 uint options;
                 dialog.GetOptions(out options);
-                dialog.SetOptions(options | FosPickFolders | FosAllNonStorageItems | FosPathMustExist | FosNoChangeDir);
+                dialog.SetOptions(PickerOptions(options));
                 dialog.SetTitle("Folder Difference Copy");
             }
             finally
@@ -49,15 +53,20 @@ namespace FolderDiffCopy
             }
         }
 
+        static uint PickerOptions(uint options)
+        {
+            options |= FosPickFolders | FosAllNonStorageItems | FosNoChangeDir | FosNoValidate;
+            options &= ~(FosForceFileSystem | FosPathMustExist | FosFileMustExist);
+            return options;
+        }
+
         // Turns typed text such as "This PC\Pixel 8\Internal shared storage\Music" into a
         // phone folder. Returns null when the text is not a phone folder.
         public static FolderSpot ResolvePhone(string text)
         {
             if (string.IsNullOrEmpty(text)) return null;
-            Guid iid = typeof(IShellItem).GUID;
-            IShellItem item;
-            int hr = SHCreateItemFromParsingName(text, IntPtr.Zero, ref iid, out item);
-            if (hr < 0 || item == null) return null;
+            IShellItem item = OpenItem(text);
+            if (item == null) return null;
             try
             {
                 FolderSpot spot = Classify(item);
@@ -70,28 +79,97 @@ namespace FolderDiffCopy
             }
         }
 
+        static IShellItem OpenItem(string text)
+        {
+            Guid iid = typeof(IShellItem).GUID;
+            IShellItem item;
+            int hr = SHCreateItemFromParsingName(text, IntPtr.Zero, ref iid, out item);
+            if (hr >= 0 && item != null) return item;
+            IntPtr pidl;
+            hr = SHParseDisplayName(text, IntPtr.Zero, out pidl, 0, IntPtr.Zero);
+            if (hr < 0 || pidl == IntPtr.Zero) return null;
+            try
+            {
+                hr = SHCreateItemFromIDList(pidl, ref iid, out item);
+                return hr >= 0 ? item : null;
+            }
+            finally
+            {
+                Marshal.FreeCoTaskMem(pidl);
+            }
+        }
+
         static FolderSpot Classify(IShellItem item)
         {
             string path = null;
             try { item.GetDisplayName(SigdnFileSystemPath, out path); }
             catch (Exception) { path = null; }
-            if (!string.IsNullOrEmpty(path)) return FolderSpot.ForPath(path);
+            if (PhoneShell.UseAsDiskFolder(path)) return FolderSpot.ForPath(path);
+
+            uint attributes = 0;
+            try { item.GetAttributes(SfgaoFolder, out attributes); }
+            catch (Exception) { attributes = 0; }
+            if ((attributes & SfgaoFolder) == 0)
+                return FolderSpot.Problem(NotAFolder);
+
+            bool isDevice;
+            if (!LooksLikePhone(item, out isDevice))
+                return FolderSpot.Problem(NotAFolder);
+            if (isDevice)
+                return FolderSpot.Problem(PhoneItself);
 
             string parsing = null;
             try { item.GetDisplayName(SigdnDesktopAbsoluteParsing, out parsing); }
             catch (Exception) { parsing = null; }
-            uint attributes = 0;
-            try { item.GetAttributes(SfgaoFolder, out attributes); }
-            catch (Exception) { attributes = 0; }
-            if (!PhoneShell.IsPhoneItem(parsing) || (attributes & SfgaoFolder) == 0)
-                return FolderSpot.Problem(NotAFolder);
-            if (PhoneShell.IsPhoneDevice(parsing))
-                return FolderSpot.Problem(PhoneItself);
-
             string text = null;
             try { item.GetDisplayName(SigdnDesktopAbsoluteEditing, out text); }
             catch (Exception) { text = null; }
             return FolderSpot.ForPhone(parsing, text);
+        }
+
+        static bool LooksLikePhone(IShellItem item, out bool isDevice)
+        {
+            isDevice = false;
+            string parsing = null;
+            try { item.GetDisplayName(SigdnDesktopAbsoluteParsing, out parsing); }
+            catch (Exception) { parsing = null; }
+            if (PhoneShell.IsPhoneItem(parsing))
+            {
+                isDevice = PhoneShell.IsPhoneDevice(parsing);
+                return true;
+            }
+
+            uint fileSystem = 0;
+            try { item.GetAttributes(SfgaoFileSystem, out fileSystem); }
+            catch (Exception) { fileSystem = 0; }
+            if ((fileSystem & SfgaoFileSystem) != 0) return false;
+
+            IShellItem parent = null;
+            try { item.GetParent(out parent); }
+            catch (Exception) { parent = null; }
+            if (parent == null) return false;
+            try
+            {
+                string parentParse = null;
+                try { parent.GetDisplayName(SigdnDesktopAbsoluteParsing, out parentParse); }
+                catch (Exception) { parentParse = null; }
+                if (PhoneShell.IsThisPcOrPortableDevices(parentParse))
+                {
+                    isDevice = true;
+                    return true;
+                }
+                bool parentDevice;
+                if (LooksLikePhone(parent, out parentDevice))
+                {
+                    isDevice = false;
+                    return true;
+                }
+                return false;
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(parent);
+            }
         }
 
         static FolderSpot PickExplorer(IWin32Window owner, string title, string startPath, string startPhoneItem)
@@ -102,7 +180,7 @@ namespace FolderDiffCopy
                 dialog = (IFileOpenDialog)new FileOpenDialog();
                 uint options;
                 dialog.GetOptions(out options);
-                dialog.SetOptions(options | FosPickFolders | FosAllNonStorageItems | FosPathMustExist | FosNoChangeDir);
+                dialog.SetOptions(PickerOptions(options));
                 if (!string.IsNullOrEmpty(title))
                     dialog.SetTitle(title);
                 string startItem = null;
@@ -161,6 +239,20 @@ namespace FolderDiffCopy
         static extern int SHCreateItemFromParsingName(
             string path,
             IntPtr bind,
+            ref Guid iid,
+            [MarshalAs(UnmanagedType.Interface)] out IShellItem item);
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+        static extern int SHParseDisplayName(
+            string name,
+            IntPtr bind,
+            out IntPtr pidl,
+            uint attributesIn,
+            IntPtr attributesOut);
+
+        [DllImport("shell32.dll", PreserveSig = true)]
+        static extern int SHCreateItemFromIDList(
+            IntPtr pidl,
             ref Guid iid,
             [MarshalAs(UnmanagedType.Interface)] out IShellItem item);
 

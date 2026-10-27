@@ -23,6 +23,12 @@ namespace FolderDiffCopy
             catch (IOException)
             {
             }
+            catch (ArgumentException)
+            {
+            }
+            catch (NotSupportedException)
+            {
+            }
             if (path.Length > 3)
                 path = path.TrimEnd('\\');
             return path;

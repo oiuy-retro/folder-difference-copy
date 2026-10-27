@@ -414,7 +414,9 @@ namespace FolderDiffCopy
         {
             FolderSpot spot = box == folderA ? phoneA : phoneB;
             if (spot == null) return null;
-            if (!string.Equals(box.Text.Trim(), spot.Text, StringComparison.Ordinal)) return null;
+            string shown = box.Text == null ? "" : box.Text.Trim();
+            string kept = spot.Text == null ? "" : spot.Text.Trim();
+            if (!string.Equals(shown, kept, StringComparison.OrdinalIgnoreCase)) return null;
             return spot;
         }
 
@@ -802,7 +804,7 @@ namespace FolderDiffCopy
             FolderSpot phone = PhoneFor(box);
             if (phone != null) return phone;
             string text = box.Text.Trim().Trim('"').Trim();
-            if (text.Length > 0 && !LooksLikePath(text))
+            if (text.Length > 0 && LooksLikePhoneText(text))
             {
                 FolderSpot typed = FolderDialog.ResolvePhone(text);
                 if (typed != null)
@@ -832,6 +834,13 @@ namespace FolderDiffCopy
             {
                 return true;
             }
+        }
+
+        static bool LooksLikePhoneText(string text)
+        {
+            if (text.StartsWith("::")) return true;
+            if (text.IndexOf("This PC", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            return !LooksLikePath(text);
         }
 
         void OnCompareDone(CompareResult result, Exception error)
