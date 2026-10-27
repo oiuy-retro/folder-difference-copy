@@ -795,6 +795,24 @@ namespace FolderDiffCopy
             bool writeFolders = !preview;
             bool copyBothWays = bothWays.Checked;
             ScanStatus scanning = scan;
+            // Phone shell items belong to this window's thread. Running the compare
+            // from a worker and hopping back blocks Explorer calls, so the phone
+            // folder looks closed even though Browse just opened it.
+            if (folderFrom.IsPhone || folderTo.IsPhone)
+            {
+                CompareResult phoneResult = null;
+                Exception phoneFailed = null;
+                try
+                {
+                    phoneResult = PhoneDiff.Compare(folderFrom, folderTo, scanning, writeFolders, copyBothWays);
+                }
+                catch (Exception ex)
+                {
+                    phoneFailed = ex;
+                }
+                OnCompareDone(phoneResult, phoneFailed);
+                return;
+            }
             System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
                 CompareResult result = null;

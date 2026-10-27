@@ -122,6 +122,10 @@ namespace FolderDiffCopy
             string text = null;
             try { item.GetDisplayName(SigdnDesktopAbsoluteEditing, out text); }
             catch (Exception) { text = null; }
+            // A missing parsing name must not turn a phone folder into a disk path.
+            // The picked shell item is what Preview uses.
+            if (string.IsNullOrEmpty(parsing))
+                parsing = string.IsNullOrEmpty(text) ? "phone-folder" : text;
             return FolderSpot.ForPhone(parsing, text, PhoneShell.Register(item));
         }
 
@@ -205,13 +209,9 @@ namespace FolderDiffCopy
 
                 IShellItem result;
                 dialog.GetResult(out result);
-                IShellItem bound = PhoneShell.Bindable(result);
-                if (bound != null && !object.ReferenceEquals(bound, result))
-                {
-                    try { Marshal.ReleaseComObject(result); }
-                    catch { }
-                    result = bound;
-                }
+                // Keep the item the folder dialog just opened. A PIDL clone is a
+                // different object, and releasing the dialog item is what made
+                // Preview lose a folder the user had already opened.
                 FolderSpot spot = Classify(result);
                 if (spot != null && spot.IsPhone)
                 {

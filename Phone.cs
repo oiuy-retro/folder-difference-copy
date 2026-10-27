@@ -608,32 +608,33 @@ namespace FolderDiffCopy
 
         public static List<IShellItem> Children(IShellItem folder)
         {
+            // Shell.Application is what listed this phone before. Try it first.
+            List<IShellItem> viaApp = null;
+            try { viaApp = ChildrenByShellApp(folder); }
+            catch (Exception) { viaApp = null; }
+            if (viaApp != null && viaApp.Count > 0) return viaApp;
+
             List<IShellItem> viaFolder = null;
             try { viaFolder = ChildrenByShellFolder(folder); }
             catch (Exception) { viaFolder = null; }
-            if (viaFolder != null && viaFolder.Count > 0) return viaFolder;
+            if (viaFolder != null && viaFolder.Count > 0)
+            {
+                ReleaseList(viaApp);
+                return viaFolder;
+            }
 
             List<IShellItem> viaItems = null;
             try { viaItems = ChildrenByEnumItems(folder); }
             catch (Exception) { viaItems = null; }
             if (viaItems != null && viaItems.Count > 0)
             {
+                ReleaseList(viaApp);
                 ReleaseList(viaFolder);
                 return viaItems;
             }
-
-            List<IShellItem> viaApp = null;
-            try { viaApp = ChildrenByShellApp(folder); }
-            catch (Exception) { viaApp = null; }
-            if (viaApp != null && viaApp.Count > 0)
-            {
-                ReleaseList(viaFolder);
-                ReleaseList(viaItems);
-                return viaApp;
-            }
+            if (viaApp != null) return viaApp;
             if (viaFolder != null) return viaFolder;
             if (viaItems != null) return viaItems;
-            if (viaApp != null) return viaApp;
             return new List<IShellItem>();
         }
 
@@ -641,6 +642,8 @@ namespace FolderDiffCopy
         {
             var list = new List<IShellItem>();
             object ns = NamespaceFromItem(folder);
+            if (ns == null) ns = ShellNameSpace(ParsingName(folder));
+            if (ns == null) ns = ShellNameSpace(EditingName(folder));
             if (ns == null) return list;
             object items = ShellGet(ns, "Items");
             if (items == null) return list;
@@ -650,8 +653,12 @@ namespace FolderDiffCopy
                 object fi = ShellInvoke(items, "Item", i);
                 if (fi == null) continue;
                 string name = ShellGet(fi, "Name") as string;
+                string path = ShellGet(fi, "Path") as string;
                 IShellItem child = null;
-                if (!string.IsNullOrEmpty(name)) child = RelativeChild(folder, name);
+                // Opening each child by the path Explorer reports is slow on a phone.
+                // It is also the call that actually returned the files.
+                if (!string.IsNullOrEmpty(path)) child = Open(path);
+                if (child == null && !string.IsNullOrEmpty(name)) child = RelativeChild(folder, name);
                 if (child != null) list.Add(child);
             }
             return list;
@@ -849,6 +856,24 @@ namespace FolderDiffCopy
         // and never treated as real files.
         public static void Scan(PhoneTree tree, Dictionary<string, PhoneEntry> files, HashSet<string> dirs, bool countAsA, ScanStatus status)
         {
+            // Same order as the build that listed this phone: ask Explorer's shell
+            // for the folder the user picked, then fall back to the live shell item.
+            bool opened = false;
+            try
+            {
+                opened = ScanByDisplayName(tree, files, dirs, countAsA, status);
+            }
+            catch (Exception ex)
+            {
+                if (files.Count > 0 || dirs.Count > 0 || status.Cancel) return;
+                if (PhoneErrors.Describe(ex) == PhoneErrors.Unplugged)
+                {
+                    ForgetTree(tree);
+                    throw;
+                }
+            }
+            if (files.Count > 0 || dirs.Count > 0 || status.Cancel) return;
+
             IShellItem root = RootItem(tree);
             if (root != null && tree.Live == null) tree.Live = root;
             if (root != null)
@@ -859,20 +884,17 @@ namespace FolderDiffCopy
                 }
                 catch (Exception ex)
                 {
+                    if (files.Count > 0 || dirs.Count > 0 || status.Cancel) return;
                     if (PhoneErrors.Describe(ex) == PhoneErrors.Unplugged)
+                    {
                         ForgetTree(tree);
+                        throw;
+                    }
                 }
-                if (files.Count > 0 || dirs.Count > 0 || status.Cancel) return;
             }
-            try
-            {
-                ScanByDisplayName(tree, files, dirs, countAsA, status);
-            }
-            catch (Exception)
-            {
-                if (tree.Live != null || tree.RootCookie != 0) return;
-                throw;
-            }
+            if (files.Count > 0 || dirs.Count > 0 || status.Cancel) return;
+            if (opened || root != null) return;
+            throw new PhoneException(PhoneErrors.CannotReach);
         }
 
         static bool OnUiThread()
@@ -892,16 +914,72 @@ namespace FolderDiffCopy
             return Open(tree.RootText);
         }
 
-        static void ScanByDisplayName(PhoneTree tree, Dictionary<string, PhoneEntry> files, HashSet<string> dirs, bool countAsA, ScanStatus status)
+        // Returns true when Explorer opened some folder object for this tree.
+        static bool ScanByDisplayName(PhoneTree tree, Dictionary<string, PhoneEntry> files, HashSet<string> dirs, bool countAsA, ScanStatus status)
         {
-            object ns = null;
-            if (tree.Live != null) ns = NamespaceFromItem(tree.Live);
-            if (ns == null) ns = FindPhoneNamespace(tree.Root, tree.RootText);
-            if (ns == null) throw new PhoneException(PhoneErrors.CannotReach);
+            object ns = OpenShellNamespace(tree);
+            if (ns == null) return false;
             IShellItem parent = tree.Live;
             if (parent == null) parent = Open(tree.Root);
             if (parent == null) parent = Open(tree.RootText);
+            if (parent != null && tree.Live == null) tree.Live = parent;
             ScanShellFolder(ns, "", parent, tree, files, dirs, countAsA, status);
+            return true;
+        }
+
+        static object OpenShellNamespace(PhoneTree tree)
+        {
+            string liveEdit = tree.Live == null ? null : EditingName(tree.Live);
+            string liveParse = tree.Live == null ? null : ParsingName(tree.Live);
+            string[] candidates = new string[]
+            {
+                tree.RootText,
+                tree.Root,
+                liveEdit,
+                liveParse,
+                ShellPrefix(tree.Root),
+                ShellPrefix(liveParse)
+            };
+            for (int i = 0; i < candidates.Length; i++)
+            {
+                object ns = ShellNameSpace(candidates[i]);
+                if (ns != null) return ns;
+            }
+            object walked = WalkFromThisPc(tree.RootText);
+            if (walked != null) return walked;
+            walked = WalkFromThisPc(liveEdit);
+            if (walked != null) return walked;
+            walked = WalkParsing(tree.Root);
+            if (walked != null) return walked;
+            return WalkParsing(liveParse);
+        }
+
+        static string ShellPrefix(string parsing)
+        {
+            if (string.IsNullOrEmpty(parsing)) return null;
+            if (parsing.StartsWith("shell:", StringComparison.OrdinalIgnoreCase)) return parsing;
+            if (parsing.StartsWith("::", StringComparison.Ordinal)) return "shell:" + parsing;
+            return null;
+        }
+
+        static object WalkParsing(string parsing)
+        {
+            if (string.IsNullOrEmpty(parsing)) return null;
+            object portable = ShellNameSpace(PortableDevicesFolder);
+            if (portable == null) portable = ShellNameSpace("shell:" + PortableDevicesFolder);
+            if (portable == null) return null;
+            string[] parts = SplitShellPath(parsing);
+            int start = 0;
+            for (int i = 0; i < parts.Length; i++)
+            {
+                if (parts[i].IndexOf("35786D3C-B075-49B9-88DD-029876E11C01", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    start = i + 1;
+                    break;
+                }
+            }
+            if (start == 0) return null;
+            return WalkParts(portable, parts, start);
         }
 
         static object NamespaceFromItem(IShellItem item)
@@ -992,6 +1070,16 @@ namespace FolderDiffCopy
         static object FolderOf(object folderItem)
         {
             if (folderItem == null) return null;
+            // FolderItem.GetFolder is a method. Reading it as a property always failed,
+            // so walking down from This PC never reached the phone.
+            try
+            {
+                object folder = ShellInvoke(folderItem, "GetFolder");
+                if (folder != null) return folder;
+            }
+            catch
+            {
+            }
             try
             {
                 object folder = ShellGet(folderItem, "GetFolder");
@@ -1074,7 +1162,8 @@ namespace FolderDiffCopy
                 try { isFolder = Convert.ToBoolean(ShellGet(fi, "IsFolder")); }
                 catch { isFolder = false; }
                 IShellItem live = null;
-                if (parent != null) live = RelativeChild(parent, name);
+                if (!string.IsNullOrEmpty(path)) live = Open(path);
+                if (live == null && parent != null) live = RelativeChild(parent, name);
                 if (isFolder)
                 {
                     if (dirs.Contains(rel))
@@ -1086,9 +1175,11 @@ namespace FolderDiffCopy
                     if (!string.IsNullOrEmpty(path)) tree.SetDir(rel, path);
                     if (live != null) tree.SetLive(rel, live);
                     object child = null;
-                    if (!string.IsNullOrEmpty(path)) child = ShellNameSpace(path);
+                    try { child = ShellInvoke(fi, "GetFolder"); }
+                    catch { child = null; }
+                    if (child == null && !string.IsNullOrEmpty(path)) child = ShellNameSpace(path);
                     if (child == null && live != null) child = ShellNameSpace(ParsingName(live));
-                    if (child != null) ScanShellFolder(child, rel, live, tree, files, dirs, countAsA, status);
+                    if (child != null) ScanShellFolder(child, rel, live != null ? live : parent, tree, files, dirs, countAsA, status);
                     continue;
                 }
                 if (name.EndsWith(PartSuffix, StringComparison.OrdinalIgnoreCase))
