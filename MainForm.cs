@@ -92,6 +92,7 @@ namespace FolderDiffCopy
             SetStatus(persistentStatus, false);
             timer.Interval = 100;
             timer.Tick += OnTick;
+            PhoneShell.Ui = System.Threading.SynchronizationContext.Current;
         }
 
         void Build()

@@ -67,16 +67,14 @@ namespace FolderDiffCopy
             if (string.IsNullOrEmpty(text)) return null;
             IShellItem item = OpenItem(text);
             if (item == null) return null;
-            try
-            {
-                FolderSpot spot = Classify(item);
-                if (spot == null || !spot.IsPhone) return null;
-                return spot;
-            }
-            finally
+            FolderSpot spot = Classify(item);
+            if (spot == null || !spot.IsPhone)
             {
                 Marshal.ReleaseComObject(item);
+                return null;
             }
+            spot.Live = item;
+            return spot;
         }
 
         static IShellItem OpenItem(string text)
@@ -207,14 +205,14 @@ namespace FolderDiffCopy
 
                 IShellItem result;
                 dialog.GetResult(out result);
-                try
+                FolderSpot spot = Classify(result);
+                if (spot != null && spot.IsPhone)
                 {
-                    return Classify(result);
+                    spot.Live = result;
+                    return spot;
                 }
-                finally
-                {
-                    Marshal.ReleaseComObject(result);
-                }
+                Marshal.ReleaseComObject(result);
+                return spot;
             }
             finally
             {

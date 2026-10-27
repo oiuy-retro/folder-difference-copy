@@ -17,6 +17,7 @@ namespace FolderDiffCopy
         public string Text;
         public string Error;
         public uint GitCookie;
+        public IShellItem Live;
 
         public bool IsPhone
         {
@@ -60,6 +61,7 @@ namespace FolderDiffCopy
         public string Root;
         public string RootText;
         public uint RootCookie;
+        public IShellItem Live;
         public readonly Dictionary<string, string> Dirs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public readonly Dictionary<string, string> Files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public readonly List<string> Leftovers = new List<string>();
@@ -237,15 +239,37 @@ namespace FolderDiffCopy
             return t.StartsWith(guid + "\\", StringComparison.OrdinalIgnoreCase);
         }
 
-        // All phone COM runs on one STA thread. A new thread per call cannot
-        // reopen a phone folder that was picked on the window's thread.
+        // Phone folders picked in the window must be used on that window's thread.
+        public static SynchronizationContext Ui;
+
         public static void RunSta(ThreadStart work)
         {
+            if (Ui != null)
+            {
+                if (object.ReferenceEquals(Ui, SynchronizationContext.Current))
+                {
+                    work();
+                    return;
+                }
+                Exception failed = null;
+                Ui.Send(delegate
+                {
+                    try { work(); }
+                    catch (Exception ex) { failed = ex; }
+                }, null);
+                if (failed != null) throw failed;
+                return;
+            }
             PhoneSta.Run(work);
         }
 
         public static void StartSta(ThreadStart work)
         {
+            if (Ui != null)
+            {
+                Ui.Post(delegate { work(); }, null);
+                return;
+            }
             PhoneSta.Post(work);
         }
 
@@ -267,10 +291,18 @@ namespace FolderDiffCopy
 
         public static void Revoke(FolderSpot spot)
         {
-            if (spot == null || spot.GitCookie == 0) return;
-            try { GitTable().RevokeInterfaceFromGlobal(spot.GitCookie); }
-            catch { }
-            spot.GitCookie = 0;
+            if (spot == null) return;
+            if (spot.GitCookie != 0)
+            {
+                try { GitTable().RevokeInterfaceFromGlobal(spot.GitCookie); }
+                catch { }
+                spot.GitCookie = 0;
+            }
+            if (spot.Live != null)
+            {
+                Release(spot.Live);
+                spot.Live = null;
+            }
         }
 
         public static IShellItem FromCookie(uint cookie)
@@ -365,6 +397,12 @@ namespace FolderDiffCopy
 
         public static IShellItem OpenOrThrow(string parsingName, uint cookie, string displayText)
         {
+            return OpenOrThrow(parsingName, cookie, displayText, null);
+        }
+
+        public static IShellItem OpenOrThrow(string parsingName, uint cookie, string displayText, IShellItem live)
+        {
+            if (live != null) return live;
             IShellItem item = FromCookie(cookie);
             if (item == null) item = Open(parsingName);
             if (item == null) item = Open(displayText);
@@ -633,14 +671,84 @@ namespace FolderDiffCopy
         // and never treated as real files.
         public static void Scan(PhoneTree tree, Dictionary<string, PhoneEntry> files, HashSet<string> dirs, bool countAsA, ScanStatus status)
         {
-            IShellItem root = OpenOrThrow(tree.Root, tree.RootCookie, tree.RootText);
-            try
+            IShellItem root = tree.Live;
+            bool own = false;
+            if (root == null)
             {
-                ScanFolder(root, "", tree, files, dirs, countAsA, status);
+                try
+                {
+                    root = OpenOrThrow(tree.Root, tree.RootCookie, tree.RootText, null);
+                    own = true;
+                }
+                catch (Exception)
+                {
+                    root = null;
+                }
             }
-            finally
+            if (root != null)
             {
-                Release(root);
+                try
+                {
+                    ScanFolder(root, "", tree, files, dirs, countAsA, status);
+                }
+                finally
+                {
+                    if (own) Release(root);
+                }
+                if (files.Count > 0 || dirs.Count > 0 || status.Cancel) return;
+            }
+            ScanByDisplayName(tree, files, dirs, countAsA, status);
+        }
+
+        static void ScanByDisplayName(PhoneTree tree, Dictionary<string, PhoneEntry> files, HashSet<string> dirs, bool countAsA, ScanStatus status)
+        {
+            object ns = ShellNameSpace(tree.RootText);
+            if (ns == null) ns = ShellNameSpace(tree.Root);
+            if (ns == null) throw new PhoneException(PhoneErrors.CannotReach);
+            ScanShellFolder(ns, "", tree, files, dirs, countAsA, status);
+        }
+
+        static void ScanShellFolder(object ns, string relDir, PhoneTree tree, Dictionary<string, PhoneEntry> files, HashSet<string> dirs, bool countAsA, ScanStatus status)
+        {
+            object items = ShellGet(ns, "Items");
+            if (items == null) return;
+            int count = Convert.ToInt32(ShellGet(items, "Count"));
+            for (int i = 0; i < count; i++)
+            {
+                if (status.Cancel) return;
+                object fi = ShellInvoke(items, "Item", i);
+                if (fi == null) continue;
+                string name = ShellGet(fi, "Name") as string;
+                if (string.IsNullOrEmpty(name)) continue;
+                string rel = relDir.Length == 0 ? name : relDir + "\\" + name;
+                string path = ShellGet(fi, "Path") as string;
+                bool isFolder = false;
+                try { isFolder = Convert.ToBoolean(ShellGet(fi, "IsFolder")); }
+                catch { isFolder = false; }
+                if (isFolder)
+                {
+                    if (dirs.Contains(rel)) continue;
+                    dirs.Add(rel);
+                    if (!string.IsNullOrEmpty(path)) tree.SetDir(rel, path);
+                    object child = ShellNameSpace(path);
+                    if (child != null) ScanShellFolder(child, rel, tree, files, dirs, countAsA, status);
+                    continue;
+                }
+                if (name.EndsWith(PartSuffix, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!string.IsNullOrEmpty(path)) tree.Leftovers.Add(path);
+                    continue;
+                }
+                if (files.ContainsKey(rel)) continue;
+                PhoneEntry entry = new PhoneEntry();
+                try { entry.Size = Convert.ToInt64(ShellGet(fi, "Size")); }
+                catch { entry.Size = 0; }
+                if (entry.Size < 0) entry.Size = 0;
+                entry.Item = path;
+                files[rel] = entry;
+                if (!string.IsNullOrEmpty(path)) tree.SetFile(rel, path);
+                if (countAsA) status.FilesA++;
+                else status.FilesB++;
             }
         }
 
@@ -1125,6 +1233,7 @@ namespace FolderDiffCopy
             tree.Root = spot.PhoneItem;
             tree.RootText = spot.Text;
             tree.RootCookie = spot.GitCookie;
+            tree.Live = spot.Live;
             return tree;
         }
 
