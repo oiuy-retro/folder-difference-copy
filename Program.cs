@@ -87,6 +87,8 @@ namespace FolderDiffCopy
                 failed += Check(log, "phone relative child", delegate { TestPhoneRelativeChild(); });
                 failed += Check(log, "phone copy to a disk folder", delegate { TestPhoneCopyToFolder(root); });
                 failed += Check(log, "phone part file is renamed", delegate { TestPhonePartRename(root); });
+                failed += Check(log, "phone real name is only kept when it is the new copy", delegate { TestPhoneNewCopyRules(); });
+                failed += Check(log, "phone folder file probe", delegate { TestPhoneProbeFile(root); });
             }
             finally
             {
@@ -700,6 +702,79 @@ namespace FolderDiffCopy
             });
             Need(File.ReadAllText(Path.Combine(destDir, "out.txt")) == "part-rename", "renamed file contents");
             Need(!File.Exists(Path.Combine(destDir, "out.txt" + PhoneShell.PartSuffix)), "part file left behind");
+        }
+
+        static PhoneFileState PhoneState(bool exists, long size, string item)
+        {
+            PhoneFileState state = new PhoneFileState();
+            state.Exists = exists;
+            state.Size = size;
+            state.Item = item;
+            return state;
+        }
+
+        static void TestPhoneNewCopyRules()
+        {
+            PhoneFileState none = PhoneState(false, -1, null);
+            Need(!PhoneShell.LooksLikeNewCopy(none, none, 10), "nothing there was accepted");
+            Need(PhoneShell.LooksLikeNewCopy(none, PhoneState(true, 10, "new"), 10), "new file with the right size was refused");
+            Need(PhoneShell.LooksLikeNewCopy(none, PhoneState(true, -1, "new"), 10), "new file of unknown size was refused");
+            Need(!PhoneShell.LooksLikeNewCopy(none, PhoneState(true, 4, "new"), 10), "new file with the wrong size was accepted");
+
+            PhoneFileState old = PhoneState(true, 7, "old");
+            Need(!PhoneShell.LooksLikeNewCopy(old, PhoneState(true, 7, "old"), 10), "the old file was accepted as the copy");
+            Need(!PhoneShell.LooksLikeNewCopy(old, PhoneState(true, -1, "old"), 10), "the old file of unknown size was accepted");
+            Need(PhoneShell.LooksLikeNewCopy(old, PhoneState(true, 10, "old"), 10), "a resized file was refused");
+            Need(PhoneShell.LooksLikeNewCopy(old, PhoneState(true, 10, "other"), 10), "a replaced file was refused");
+            Need(!PhoneShell.LooksLikeNewCopy(old, PhoneState(true, 9, "other"), 10), "a wrong-size file was accepted");
+            PhoneFileState sameSize = PhoneState(true, 10, "old");
+            Need(!PhoneShell.LooksLikeNewCopy(sameSize, PhoneState(true, 10, "old"), 10), "the same old object was accepted");
+            Need(PhoneShell.LooksLikeNewCopy(sameSize, PhoneState(true, 10, "other"), 10), "a new object of the same size was refused");
+            Need(!PhoneShell.LooksLikeNewCopy(PhoneState(true, 10, null), PhoneState(true, 10, null), 10), "an unidentified same-size file was accepted");
+        }
+
+        static void TestPhoneProbeFile(string root)
+        {
+            string dir = Path.Combine(root, "phone-probe");
+            string src = Path.Combine(dir, "src.txt");
+            string destDir = Path.Combine(dir, "dest");
+            Directory.CreateDirectory(destDir);
+            File.WriteAllText(src, "probe-new-copy");
+            File.WriteAllText(Path.Combine(destDir, "out.txt"), "old");
+            PhoneShell.RunSta(delegate
+            {
+                IShellItem source = PhoneShell.Open(src);
+                IShellItem folder = PhoneShell.Open(destDir);
+                Need(source != null && folder != null, "could not open probe folders");
+                IShellItem part = null;
+                try
+                {
+                    PhoneFileState missing = PhoneShell.ProbeFile(folder, "nothing.txt");
+                    Need(!missing.Exists, "missing file reported");
+                    PhoneFileState before = PhoneShell.ProbeFile(folder, "out.txt");
+                    Need(before.Exists, "existing file not found");
+                    Need(before.Size == 3, "existing size " + before.Size.ToString());
+                    Need(!PhoneShell.LooksLikeNewCopy(before, PhoneShell.ProbeFile(folder, "out.txt"), 14), "untouched old file looked like the copy");
+
+                    PhoneShell.CopyToFolder(source, folder, "out.txt" + PhoneShell.PartSuffix, null, null);
+                    part = PhoneShell.FindChild(folder, "out.txt" + PhoneShell.PartSuffix);
+                    Need(part != null, "part file missing");
+                    PhoneShell.DeleteNamedQuiet(folder, "out.txt");
+                    string made;
+                    PhoneShell.RenameItem(part, "out.txt", out made);
+                    if (made != null)
+                        Need(PhoneShell.NameOf(made) == "out.txt", "rename reported " + PhoneShell.NameOf(made));
+                    Need(!PhoneShell.ProbeFile(folder, "out.txt" + PhoneShell.PartSuffix).Exists, "part file still there");
+                    Need(PhoneShell.LooksLikeNewCopy(before, PhoneShell.ProbeFile(folder, "out.txt"), 14), "renamed copy was not recognized");
+                }
+                finally
+                {
+                    PhoneShell.Release(part);
+                    PhoneShell.Release(source);
+                    PhoneShell.Release(folder);
+                }
+            });
+            Need(File.ReadAllText(Path.Combine(destDir, "out.txt")) == "probe-new-copy", "probe copy contents");
         }
 
         static int RunPhoneProbe()

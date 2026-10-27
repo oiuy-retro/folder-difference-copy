@@ -131,6 +131,13 @@ namespace FolderDiffCopy
         }
     }
 
+    internal struct PhoneFileState
+    {
+        public bool Exists;
+        public long Size;
+        public string Item;
+    }
+
     internal struct PhoneEntry
     {
         public long Size;
@@ -1178,6 +1185,15 @@ namespace FolderDiffCopy
 
         public static string RenameItem(IShellItem opened, string newName)
         {
+            string made;
+            return RenameItem(opened, newName, out made);
+        }
+
+        // Renames an item. made is the parsing name of the item the rename produced, when the
+        // shell reported one, even if the rename then reported an error.
+        public static string RenameItem(IShellItem opened, string newName, out string made)
+        {
+            made = null;
             OperationSink sink = new OperationSink(null, null);
             IFileOperation op = NewOperation();
             uint cookie = 0;
@@ -1190,8 +1206,76 @@ namespace FolderDiffCopy
             }
             finally
             {
+                made = sink.NewItem;
                 Finish(op, cookie);
             }
+        }
+
+        // The real file name of the item with this parsing name, or null when it cannot be opened.
+        public static string NameOf(string item)
+        {
+            if (string.IsNullOrEmpty(item)) return null;
+            IShellItem opened = Open(item);
+            if (opened == null) return null;
+            try
+            {
+                return FileName(opened);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+            finally
+            {
+                Release(opened);
+            }
+        }
+
+        // What is in a phone folder under one name: whether it exists, its size (-1 when the
+        // phone does not say), and its parsing name, which names a different object once the
+        // file is replaced.
+        public static PhoneFileState ProbeFile(IShellItem folder, string name)
+        {
+            PhoneFileState state = new PhoneFileState();
+            state.Size = -1;
+            if (folder == null) return state;
+            IShellItem found = null;
+            try
+            {
+                found = FindChild(folder, name);
+                if (found == null) return state;
+                state.Exists = true;
+                long written;
+                try { ReadMeta(found, out state.Size, out written); }
+                catch (Exception) { state.Size = -1; }
+                try { state.Item = ParsingName(found); }
+                catch (Exception) { state.Item = null; }
+            }
+            catch (Exception)
+            {
+            }
+            finally
+            {
+                Release(found);
+            }
+            return state;
+        }
+
+        // True when the file now under the real name can be trusted to be the copy just made,
+        // not a file that was already there. A file that was not there before counts unless the
+        // phone reports a size that differs from the source. A file that was there before only
+        // counts when it now has the source's size and is visibly a different file (a different
+        // size or a different phone object than before).
+        internal static bool LooksLikeNewCopy(PhoneFileState before, PhoneFileState now, long sourceSize)
+        {
+            if (!now.Exists) return false;
+            bool sizeKnown = now.Size >= 0 && sourceSize >= 0;
+            if (!before.Exists)
+                return !sizeKnown || now.Size == sourceSize;
+            if (!sizeKnown || now.Size != sourceSize) return false;
+            if (before.Size >= 0 && before.Size != now.Size) return true;
+            return !string.IsNullOrEmpty(before.Item) && !string.IsNullOrEmpty(now.Item)
+                && !string.Equals(before.Item, now.Item, StringComparison.OrdinalIgnoreCase);
         }
 
         public static string Rename(string item, string newName)
@@ -1909,8 +1993,12 @@ namespace FolderDiffCopy
                 Action<uint, uint> progress = delegate(uint total, uint soFar) { Report(job, total, soFar); };
                 Func<bool> stopping = delegate { return cancel; };
 
+                bool removedOld = false;
                 if (!tree.NoRename)
                 {
+                    // What already has the real name, so a missing part file or a rename that
+                    // reports an error is never mistaken for a finished copy.
+                    PhoneFileState before = PhoneShell.ProbeFile(folder, name);
                     PhoneShell.DeleteNamedQuiet(folder, partName);
                     partStarted = true;
                     PhoneShell.CopyToFolder(source, folder, partName, progress, stopping);
@@ -1918,39 +2006,60 @@ namespace FolderDiffCopy
                     IShellItem part = PhoneShell.FindChild(folder, partName);
                     if (part == null)
                     {
-                        kept = PhoneShell.FindChild(folder, name);
-                        if (kept != null)
-                            return KeepPhoneFile(tree, rel, kept, ref kept, ref committed, job);
-                        throw new PhoneException("The phone did not keep the copied file.");
+                        // Some phones ignore the new name and save the real name. Only accept
+                        // that when it is clearly the new copy, not the file that was there.
+                        if (PhoneShell.LooksLikeNewCopy(before, PhoneShell.ProbeFile(folder, name), job.Size))
+                        {
+                            kept = PhoneShell.FindChild(folder, name);
+                            if (kept != null)
+                                return KeepPhoneFile(tree, rel, kept, ref kept, ref committed, job);
+                        }
                     }
-                    RemoveOld(tree, rel);
-                    bool renamed = false;
-                    try
+                    else
                     {
-                        PhoneShell.RenameItem(part, name);
-                        renamed = true;
-                    }
-                    catch (Exception ex)
-                    {
-                        if (PhoneErrors.Describe(ex) == PhoneErrors.Unplugged) throw;
-                    }
-                    PhoneShell.Release(part);
-                    if (renamed)
-                    {
-                        kept = PhoneShell.FindChild(folder, name);
-                        if (kept != null)
-                            return KeepPhoneFile(tree, rel, kept, ref kept, ref committed, job);
+                        RemoveOld(tree, rel);
+                        removedOld = true;
+                        bool renamed = false;
+                        string made = null;
+                        try
+                        {
+                            PhoneShell.RenameItem(part, name, out made);
+                            renamed = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            if (PhoneErrors.Describe(ex) == PhoneErrors.Unplugged) throw;
+                            // The rename can report an error after it has already happened.
+                            if (!PhoneShell.ProbeFile(folder, partName).Exists
+                                && PhoneShell.LooksLikeNewCopy(before, PhoneShell.ProbeFile(folder, name), job.Size))
+                                renamed = true;
+                        }
+                        PhoneShell.Release(part);
+                        // A rename that gave the part file some other name (for example
+                        // "name (1)") did not work. Remove that stray copy and write directly.
+                        string madeName = PhoneShell.NameOf(made);
+                        if (madeName != null && !string.Equals(madeName, name, StringComparison.OrdinalIgnoreCase))
+                        {
+                            renamed = false;
+                            if (!string.Equals(madeName, partName, StringComparison.OrdinalIgnoreCase))
+                                PhoneShell.DeleteQuiet(made);
+                        }
+                        if (renamed)
+                        {
+                            kept = PhoneShell.FindChild(folder, name);
+                            if (kept != null)
+                                return KeepPhoneFile(tree, rel, kept, ref kept, ref committed, job);
+                        }
                     }
                     tree.NoRename = true;
                     PhoneShell.DeleteNamedQuiet(folder, partName);
                     partStarted = false;
                     ResetProgress(job);
                 }
-                else
-                {
-                    RemoveOld(tree, rel);
-                }
 
+                // Clear the real name first so the copy never meets an existing file there.
+                if (!removedOld) RemoveOld(tree, rel);
+                PhoneShell.DeleteNamedQuiet(folder, name);
                 PhoneShell.DeleteNamedQuiet(folder, partName);
                 directStarted = true;
                 PhoneShell.CopyToFolder(source, folder, name, progress, stopping);
@@ -1980,7 +2089,10 @@ namespace FolderDiffCopy
                 }
                 PhoneShell.Release(kept);
                 PhoneShell.Release(source);
-                PhoneShell.Release(folder);
+                // Folders from OpenDir may be the tree's kept live items, which later files
+                // in the same folder still use.
+                if (!tree.Owns(folder))
+                    PhoneShell.Release(folder);
             }
         }
 
