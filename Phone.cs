@@ -65,7 +65,6 @@ namespace FolderDiffCopy
         public readonly Dictionary<string, string> Dirs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public readonly Dictionary<string, string> Files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public readonly List<string> Leftovers = new List<string>();
-        public volatile bool NoRename;
         public readonly object Gate = new object();
 
         public string DirItem(string rel)
@@ -839,8 +838,8 @@ namespace FolderDiffCopy
                 }
                 if (name.EndsWith(PartSuffix, StringComparison.OrdinalIgnoreCase))
                 {
-                    if (!string.IsNullOrEmpty(path)) tree.Leftovers.Add(path);
-                    if (live != null && !tree.Owns(live)) Release(live);
+                    tree.Leftovers.Add(rel);
+                    if (live != null) tree.SetLive(rel, live);
                     continue;
                 }
                 if (files.ContainsKey(rel))
@@ -903,8 +902,8 @@ namespace FolderDiffCopy
                 }
                 if (name.EndsWith(PartSuffix, StringComparison.OrdinalIgnoreCase))
                 {
-                    tree.Leftovers.Add(item);
-                    Release(child);
+                    tree.Leftovers.Add(rel);
+                    tree.SetLive(rel, child);
                     continue;
                 }
                 if (files.ContainsKey(rel))
@@ -1055,12 +1054,21 @@ namespace FolderDiffCopy
         public static string CopyInto(IShellItem source, IShellItem folder, string newName, Action<uint, uint> progress, Func<bool> cancelled)
         {
             string made = CopyToFolder(source, folder, newName, progress, cancelled);
-            if (made == null) throw new PhoneException("The phone did not keep the copied file.");
-            if (!HasName(made, newName))
+            IShellItem found = FindChild(folder, newName);
+            if (found != null)
             {
-                DeleteQuiet(made);
-                throw new PhoneException("The phone saved the file under a different name than " + newName + ".");
+                try
+                {
+                    string kept = ParsingName(found);
+                    if (!string.IsNullOrEmpty(kept)) return kept;
+                }
+                finally
+                {
+                    Release(found);
+                }
             }
+            if (string.IsNullOrEmpty(made))
+                throw new PhoneException("The phone did not keep the copied file.");
             return made;
         }
 
@@ -1167,9 +1175,8 @@ namespace FolderDiffCopy
             }
         }
 
-        public static string Rename(string item, string newName)
+        public static string RenameItem(IShellItem opened, string newName)
         {
-            IShellItem opened = OpenOrThrow(item);
             OperationSink sink = new OperationSink(null, null);
             IFileOperation op = NewOperation();
             uint cookie = 0;
@@ -1183,6 +1190,19 @@ namespace FolderDiffCopy
             finally
             {
                 Finish(op, cookie);
+            }
+        }
+
+        public static string Rename(string item, string newName)
+        {
+            IShellItem opened = Open(item);
+            if (opened == null) throw new PhoneException(PhoneErrors.CannotReach);
+            try
+            {
+                return RenameItem(opened, newName);
+            }
+            finally
+            {
                 Release(opened);
             }
         }
@@ -1202,9 +1222,8 @@ namespace FolderDiffCopy
             }
         }
 
-        public static void Delete(string item)
+        public static void DeleteItem(IShellItem opened)
         {
-            IShellItem opened = Open(item);
             if (opened == null) return;
             OperationSink sink = new OperationSink(null, null);
             IFileOperation op = NewOperation();
@@ -1218,6 +1237,19 @@ namespace FolderDiffCopy
             finally
             {
                 Finish(op, cookie);
+            }
+        }
+
+        public static void Delete(string item)
+        {
+            IShellItem opened = Open(item);
+            if (opened == null) return;
+            try
+            {
+                DeleteItem(opened);
+            }
+            finally
+            {
                 Release(opened);
             }
         }
@@ -1228,6 +1260,19 @@ namespace FolderDiffCopy
             catch { }
         }
 
+        public static void DeleteInTree(PhoneTree tree, string rel)
+        {
+            if (tree == null || string.IsNullOrEmpty(rel)) return;
+            IShellItem live = tree.GetLive(rel);
+            if (live == null) live = Walk(tree, rel);
+            if (live != null)
+            {
+                DeleteItem(live);
+                return;
+            }
+            Delete(rel);
+        }
+
         public static void DeleteNamedQuiet(IShellItem folder, string name)
         {
             if (folder == null) return;
@@ -1235,10 +1280,8 @@ namespace FolderDiffCopy
             {
                 IShellItem found = FindChild(folder, name);
                 if (found == null) return;
-                string item;
-                try { item = ParsingName(found); }
+                try { DeleteItem(found); }
                 finally { Release(found); }
-                Delete(item);
             }
             catch
             {
@@ -1635,7 +1678,7 @@ namespace FolderDiffCopy
         // Deletes '.fdc-part' files left on the phone when an earlier copy was cut off.
         static void RemoveLeftovers(PhoneTree tree, ScanStatus status, CompareResult result)
         {
-            foreach (string item in tree.Leftovers)
+            foreach (string rel in tree.Leftovers)
             {
                 if (status.Cancel)
                 {
@@ -1644,7 +1687,7 @@ namespace FolderDiffCopy
                 }
                 try
                 {
-                    PhoneShell.Delete(item);
+                    PhoneShell.DeleteInTree(tree, rel);
                 }
                 catch (Exception ex)
                 {
@@ -1828,9 +1871,8 @@ namespace FolderDiffCopy
             }
         }
 
-        // PC to phone: copy as '<name>.fdc-part', then rename it to the real name, so a file
-        // with its real name on the phone is always complete. If the phone refuses renames,
-        // write under the real name and delete it right away if the copy fails.
+        // PC to phone: write under the real name. Phones do not rename '.fdc-part'
+        // files, so that extra step left unfinished names on the device.
         CopyOutcome CopyToPhone(FileJob job)
         {
             PhoneTree tree = job.PhoneDest;
@@ -1841,11 +1883,9 @@ namespace FolderDiffCopy
             string partName = name + PhoneShell.PartSuffix;
             IShellItem folder = null;
             IShellItem source = null;
+            IShellItem kept = null;
             bool committed = false;
-            bool partStarted = false;
-            string partItem = null;
-            bool directStarted = false;
-            bool directDone = false;
+            bool started = false;
             try
             {
                 using (OpenedRead probe = Native.OpenForRead(job.SourcePath))
@@ -1864,62 +1904,19 @@ namespace FolderDiffCopy
                 Action<uint, uint> progress = delegate(uint total, uint soFar) { Report(job, total, soFar); };
                 Func<bool> stopping = delegate { return cancel; };
 
-                if (!tree.NoRename)
-                {
-                    partStarted = true;
-                    partItem = PhoneShell.CopyInto(source, folder, partName, progress, stopping);
-                    if (cancel) return CopyOutcome.Cancelled;
-                    RemoveOld(tree, rel);
-                    string renamed = null;
-                    bool refused = false;
-                    try
-                    {
-                        renamed = PhoneShell.Rename(partItem, name);
-                        if (renamed == null)
-                        {
-                            IShellItem found = PhoneShell.FindChild(folder, name);
-                            if (found != null)
-                            {
-                                try { renamed = PhoneShell.ParsingName(found); }
-                                finally { PhoneShell.Release(found); }
-                            }
-                        }
-                        if (renamed == null || !PhoneShell.HasName(renamed, name))
-                        {
-                            // The rename did not give the real name. Whatever the part file
-                            // became is removed below and the copy is written directly.
-                            if (renamed != null) partItem = renamed;
-                            refused = true;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        if (PhoneErrors.Describe(ex) == PhoneErrors.Unplugged) throw;
-                        refused = true;
-                    }
-                    if (!refused)
-                    {
-                        partItem = null;
-                        tree.SetFile(rel, renamed);
-                        committed = true;
-                        Complete(job);
-                        return CopyOutcome.Success;
-                    }
-                    tree.NoRename = true;
-                    PhoneShell.Delete(partItem);
-                    partItem = null;
-                    partStarted = false;
-                    ResetProgress(job);
-                }
-                else
-                {
-                    RemoveOld(tree, rel);
-                }
+                RemoveOld(tree, rel);
+                PhoneShell.DeleteNamedQuiet(folder, partName);
 
-                directStarted = true;
-                string made = PhoneShell.CopyInto(source, folder, name, progress, stopping);
-                directDone = true;
+                started = true;
+                string made = PhoneShell.CopyToFolder(source, folder, name, progress, stopping);
+                if (cancel) return CopyOutcome.Cancelled;
+                kept = PhoneShell.FindChild(folder, name);
+                if (kept == null)
+                    throw new PhoneException("The phone did not keep the copied file.");
+                if (string.IsNullOrEmpty(made)) made = PhoneShell.ParsingName(kept);
                 tree.SetFile(rel, made);
+                tree.SetLive(rel, kept);
+                kept = null;
                 committed = true;
                 Complete(job);
                 return CopyOutcome.Success;
@@ -1937,13 +1934,10 @@ namespace FolderDiffCopy
                     long partial = Interlocked.Exchange(ref job.Copied, 0);
                     if (partial != 0)
                         Interlocked.Add(ref copiedBytes, -partial);
-                    if (partItem != null)
-                        PhoneShell.DeleteQuiet(partItem);
-                    else if (partStarted)
-                        PhoneShell.DeleteNamedQuiet(folder, partName);
-                    if (directStarted && !directDone)
+                    if (started)
                         PhoneShell.DeleteNamedQuiet(folder, name);
                 }
+                PhoneShell.Release(kept);
                 PhoneShell.Release(source);
                 PhoneShell.Release(folder);
             }
@@ -1951,9 +1945,8 @@ namespace FolderDiffCopy
 
         static void RemoveOld(PhoneTree tree, string rel)
         {
-            string old = tree.FileItem(rel);
-            if (old == null) return;
-            PhoneShell.Delete(old);
+            try { PhoneShell.DeleteInTree(tree, rel); }
+            catch { }
             tree.SetFile(rel, null);
         }
 
