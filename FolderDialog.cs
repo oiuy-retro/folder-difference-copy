@@ -124,7 +124,7 @@ namespace FolderDiffCopy
             string text = null;
             try { item.GetDisplayName(SigdnDesktopAbsoluteEditing, out text); }
             catch (Exception) { text = null; }
-            return FolderSpot.ForPhone(parsing, text);
+            return FolderSpot.ForPhone(parsing, text, PhoneShell.Register(item));
         }
 
         static bool LooksLikePhone(IShellItem item, out bool isDevice)

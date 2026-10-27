@@ -289,6 +289,8 @@ namespace FolderDiffCopy
                 SetStatus("Stopping...", false);
                 return;
             }
+            PhoneShell.Revoke(phoneA);
+            PhoneShell.Revoke(phoneB);
             base.OnFormClosing(e);
         }
 
@@ -398,8 +400,7 @@ namespace FolderDiffCopy
             }
             if (picked.IsPhone)
             {
-                if (box == folderA) phoneA = picked;
-                else phoneB = picked;
+                KeepPhone(box, picked);
                 box.Text = picked.Text;
             }
             else if (!string.IsNullOrEmpty(picked.Path))
@@ -407,6 +408,20 @@ namespace FolderDiffCopy
                 box.Text = picked.Path;
             }
             ApplyOptionLocks();
+        }
+
+        void KeepPhone(TextBox box, FolderSpot picked)
+        {
+            if (box == folderA)
+            {
+                PhoneShell.Revoke(phoneA);
+                phoneA = picked;
+            }
+            else
+            {
+                PhoneShell.Revoke(phoneB);
+                phoneB = picked;
+            }
         }
 
         // The phone folder picked for this box, as long as the box still shows it.
@@ -584,6 +599,18 @@ namespace FolderDiffCopy
 
         void OnStart(object sender, EventArgs e)
         {
+            try
+            {
+                OnStartCore();
+            }
+            catch (Exception ex)
+            {
+                ShowPhoneFailure(ex);
+            }
+        }
+
+        void OnStartCore()
+        {
             if (phase != PhaseIdle) return;
             FolderSpot a;
             FolderSpot b;
@@ -650,6 +677,18 @@ namespace FolderDiffCopy
 
         void OnPreview(object sender, EventArgs e)
         {
+            try
+            {
+                OnPreviewCore();
+            }
+            catch (Exception ex)
+            {
+                ShowPhoneFailure(ex);
+            }
+        }
+
+        void OnPreviewCore()
+        {
             if (phase != PhaseIdle) return;
             FolderSpot a;
             FolderSpot b;
@@ -661,6 +700,14 @@ namespace FolderDiffCopy
                 return;
             }
             BeginScan(true);
+        }
+
+        void ShowPhoneFailure(Exception error)
+        {
+            string text = PhoneErrors.Describe(error);
+            if (string.IsNullOrEmpty(text)) text = error.GetType().Name;
+            SetStatus(text, true);
+            MessageBox.Show(this, text, "Folder Difference Copy", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         void OnFolderTextChanged(object sender, EventArgs e)
@@ -810,8 +857,7 @@ namespace FolderDiffCopy
                 if (typed != null)
                 {
                     typed.Text = text;
-                    if (box == folderA) phoneA = typed;
-                    else phoneB = typed;
+                    KeepPhone(box, typed);
                     ApplyPhoneLock();
                     return typed;
                 }
@@ -856,8 +902,11 @@ namespace FolderDiffCopy
                 timer.Stop();
                 progress.Marquee = false;
                 list.EmptyText = "Files that still need to be copied will show up here.";
-                SetStatus(error.Message, true);
+                string text = PhoneErrors.Describe(error);
+                if (string.IsNullOrEmpty(text)) text = error.GetType().Name;
+                SetStatus(text, true);
                 Text = "Folder Difference Copy";
+                MessageBox.Show(this, text, "Folder Difference Copy", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 if (closeAfterStop) Close();
                 return;
             }
@@ -1193,7 +1242,9 @@ namespace FolderDiffCopy
             metrics.SetValue(3, "-");
             detailLabel.Text = Readout.FormatBytes(bytes);
             string message = count == 0
-                ? "Nothing to copy."
+                ? ((PhoneFor(folderA) != null || PhoneFor(folderB) != null)
+                    ? "Reached the phone folder. Nothing to copy."
+                    : "Nothing to copy.")
                 : string.Format("{0:N0} files, {1}.", count, Readout.FormatBytes(bytes));
             if (broken > 0)
                 message += string.Format(" {0:N0} cannot be copied.", broken);

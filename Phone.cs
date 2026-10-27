@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using ComStream = System.Runtime.InteropServices.ComTypes.IStream;
@@ -15,6 +16,7 @@ namespace FolderDiffCopy
         public string PhoneItem;
         public string Text;
         public string Error;
+        public uint GitCookie;
 
         public bool IsPhone
         {
@@ -31,9 +33,15 @@ namespace FolderDiffCopy
 
         public static FolderSpot ForPhone(string item, string text)
         {
+            return ForPhone(item, text, 0);
+        }
+
+        public static FolderSpot ForPhone(string item, string text, uint cookie)
+        {
             FolderSpot spot = new FolderSpot();
             spot.PhoneItem = item;
             spot.Text = string.IsNullOrEmpty(text) ? item : text;
+            spot.GitCookie = cookie;
             return spot;
         }
 
@@ -50,6 +58,7 @@ namespace FolderDiffCopy
     internal sealed class PhoneTree
     {
         public string Root;
+        public uint RootCookie;
         public readonly Dictionary<string, string> Dirs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public readonly Dictionary<string, string> Files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public readonly List<string> Leftovers = new List<string>();
@@ -227,29 +236,65 @@ namespace FolderDiffCopy
             return t.StartsWith(guid + "\\", StringComparison.OrdinalIgnoreCase);
         }
 
-        // Runs work on its own single-threaded apartment thread, which the shell's
-        // file operations need, and waits for it.
+        // All phone COM runs on one STA thread. A new thread per call cannot
+        // reopen a phone folder that was picked on the window's thread.
         public static void RunSta(ThreadStart work)
         {
-            Exception failed = null;
-            Thread thread = new Thread(delegate()
-            {
-                try { work(); }
-                catch (Exception ex) { failed = ex; }
-            });
-            thread.IsBackground = true;
-            thread.SetApartmentState(ApartmentState.STA);
-            thread.Start();
-            thread.Join();
-            if (failed != null) throw failed;
+            PhoneSta.Run(work);
         }
 
         public static void StartSta(ThreadStart work)
         {
-            Thread thread = new Thread(work);
-            thread.IsBackground = true;
-            thread.SetApartmentState(ApartmentState.STA);
-            thread.Start();
+            PhoneSta.Post(work);
+        }
+
+        public static uint Register(object item)
+        {
+            if (item == null) return 0;
+            try
+            {
+                Guid iid = typeof(IShellItem).GUID;
+                uint cookie;
+                GitTable().RegisterInterfaceInGlobal(item, ref iid, out cookie);
+                return cookie;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        public static void Revoke(FolderSpot spot)
+        {
+            if (spot == null || spot.GitCookie == 0) return;
+            try { GitTable().RevokeInterfaceFromGlobal(spot.GitCookie); }
+            catch { }
+            spot.GitCookie = 0;
+        }
+
+        public static IShellItem FromCookie(uint cookie)
+        {
+            if (cookie == 0) return null;
+            try
+            {
+                Guid iid = typeof(IShellItem).GUID;
+                object obj;
+                GitTable().GetInterfaceFromGlobal(cookie, ref iid, out obj);
+                return obj as IShellItem;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        static IGlobalInterfaceTable gitTable;
+
+        static IGlobalInterfaceTable GitTable()
+        {
+            if (gitTable == null)
+                gitTable = (IGlobalInterfaceTable)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("00000323-0000-0000-C000-000000000046")));
+            return gitTable;
         }
 
         public static IShellItem Open(string parsingName)
@@ -263,7 +308,13 @@ namespace FolderDiffCopy
 
         public static IShellItem OpenOrThrow(string parsingName)
         {
-            IShellItem item = Open(parsingName);
+            return OpenOrThrow(parsingName, 0);
+        }
+
+        public static IShellItem OpenOrThrow(string parsingName, uint cookie)
+        {
+            IShellItem item = FromCookie(cookie);
+            if (item == null) item = Open(parsingName);
             if (item == null) throw new PhoneException(PhoneErrors.CannotReach);
             return item;
         }
@@ -342,11 +393,21 @@ namespace FolderDiffCopy
 
         public static List<IShellItem> Children(IShellItem folder)
         {
+            List<IShellItem> viaApp = null;
+            Exception appError = null;
+            try { viaApp = ChildrenByShellApp(folder); }
+            catch (Exception ex) { appError = ex; }
+            if (viaApp != null && viaApp.Count > 0) return viaApp;
+
             List<IShellItem> viaFolder = null;
             Exception folderError = null;
             try { viaFolder = ChildrenByShellFolder(folder); }
             catch (Exception ex) { folderError = ex; }
-            if (viaFolder != null && viaFolder.Count > 0) return viaFolder;
+            if (viaFolder != null && viaFolder.Count > 0)
+            {
+                ReleaseList(viaApp);
+                return viaFolder;
+            }
 
             List<IShellItem> viaItems = null;
             Exception itemsError = null;
@@ -354,14 +415,64 @@ namespace FolderDiffCopy
             catch (Exception ex) { itemsError = ex; }
             if (viaItems != null && viaItems.Count > 0)
             {
+                ReleaseList(viaApp);
                 ReleaseList(viaFolder);
                 return viaItems;
             }
+            if (viaApp != null) return viaApp;
             if (viaFolder != null) return viaFolder;
             if (viaItems != null) return viaItems;
+            if (appError != null) throw appError;
             if (folderError != null) throw folderError;
             if (itemsError != null) throw itemsError;
             return new List<IShellItem>();
+        }
+
+        static List<IShellItem> ChildrenByShellApp(IShellItem folder)
+        {
+            var list = new List<IShellItem>();
+            object ns = ShellNameSpace(ParsingName(folder));
+            if (ns == null) ns = ShellNameSpace(EditingName(folder));
+            if (ns == null) return list;
+            object items = ShellGet(ns, "Items");
+            if (items == null) return list;
+            int count = Convert.ToInt32(ShellGet(items, "Count"));
+            for (int i = 0; i < count; i++)
+            {
+                object fi = ShellInvoke(items, "Item", i);
+                if (fi == null) continue;
+                string path = ShellGet(fi, "Path") as string;
+                IShellItem child = null;
+                if (!string.IsNullOrEmpty(path)) child = Open(path);
+                if (child != null) list.Add(child);
+            }
+            return list;
+        }
+
+        static object ShellNameSpace(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return null;
+            Type type = Type.GetTypeFromProgID("Shell.Application");
+            if (type == null) return null;
+            object shell = Activator.CreateInstance(type);
+            try
+            {
+                return type.InvokeMember("NameSpace", BindingFlags.InvokeMethod, null, shell, new object[] { path });
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        static object ShellGet(object target, string name)
+        {
+            return target.GetType().InvokeMember(name, BindingFlags.GetProperty, null, target, null);
+        }
+
+        static object ShellInvoke(object target, string name, params object[] args)
+        {
+            return target.GetType().InvokeMember(name, BindingFlags.InvokeMethod, null, target, args);
         }
 
         static void ReleaseList(List<IShellItem> list)
@@ -407,7 +518,7 @@ namespace FolderDiffCopy
             try
             {
                 int flags = ShcontfFolders | ShcontfNonFolders | ShcontfIncludeHidden | ShcontfStorage;
-                int hrEnum = shellFolder.EnumObjects(IntPtr.Zero, flags, out enumerator);
+                int hrEnum = shellFolder.EnumObjects(GetDesktopWindow(), flags, out enumerator);
                 if (hrEnum < 0) Marshal.ThrowExceptionForHR(hrEnum);
                 if (enumerator == null) return list;
                 int hrPidl = SHGetIDListFromObject(folder, out parentPidl);
@@ -469,7 +580,7 @@ namespace FolderDiffCopy
         // and never treated as real files.
         public static void Scan(PhoneTree tree, Dictionary<string, PhoneEntry> files, HashSet<string> dirs, bool countAsA, ScanStatus status)
         {
-            IShellItem root = OpenOrThrow(tree.Root);
+            IShellItem root = OpenOrThrow(tree.Root, tree.RootCookie);
             try
             {
                 if (!IsFolder(root)) throw new PhoneException(PhoneErrors.CannotReach);
@@ -771,6 +882,84 @@ namespace FolderDiffCopy
             IntPtr pidl,
             ref Guid iid,
             [MarshalAs(UnmanagedType.Interface)] out IShellItem item);
+
+        [DllImport("user32.dll")]
+        static extern IntPtr GetDesktopWindow();
+    }
+
+    sealed class StaJob
+    {
+        public ThreadStart Work;
+        public Exception Error;
+        public ManualResetEvent Done;
+    }
+
+    // One STA thread for every phone shell call in this process.
+    static class PhoneSta
+    {
+        static readonly object Gate = new object();
+        static readonly Queue<StaJob> Queue = new Queue<StaJob>();
+        static readonly AutoResetEvent Signal = new AutoResetEvent(false);
+        static Thread thread;
+
+        static void Ensure()
+        {
+            lock (Gate)
+            {
+                if (thread != null) return;
+                thread = new Thread(Loop);
+                thread.IsBackground = true;
+                thread.SetApartmentState(ApartmentState.STA);
+                thread.Name = "PhoneSTA";
+                thread.Start();
+            }
+        }
+
+        static void Loop()
+        {
+            while (true)
+            {
+                StaJob job = null;
+                lock (Gate)
+                {
+                    if (Queue.Count > 0) job = Queue.Dequeue();
+                }
+                if (job == null)
+                {
+                    Signal.WaitOne();
+                    continue;
+                }
+                try { job.Work(); }
+                catch (Exception ex) { job.Error = ex; }
+                if (job.Done != null) job.Done.Set();
+            }
+        }
+
+        static void Enqueue(StaJob job)
+        {
+            Ensure();
+            lock (Gate) Queue.Enqueue(job);
+            Signal.Set();
+        }
+
+        public static void Run(ThreadStart work)
+        {
+            ManualResetEvent done = new ManualResetEvent(false);
+            StaJob job = new StaJob();
+            job.Work = work;
+            job.Done = done;
+            Enqueue(job);
+            done.WaitOne();
+            done.Close();
+            if (job.Error != null) throw job.Error;
+        }
+
+        public static void Post(ThreadStart work)
+        {
+            StaJob job = new StaJob();
+            job.Work = work;
+            Enqueue(job);
+        }
     }
 
     internal struct PlannedCopy
@@ -874,6 +1063,7 @@ namespace FolderDiffCopy
         {
             PhoneTree tree = new PhoneTree();
             tree.Root = spot.PhoneItem;
+            tree.RootCookie = spot.GitCookie;
             return tree;
         }
 
@@ -1398,6 +1588,16 @@ namespace FolderDiffCopy
         [PreserveSig] int Skip(uint count);
         [PreserveSig] int Reset();
         [PreserveSig] int Clone(out IEnumIDList copy);
+    }
+
+    [ComImport]
+    [Guid("00000146-0000-0000-C000-000000000046")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IGlobalInterfaceTable
+    {
+        void RegisterInterfaceInGlobal([MarshalAs(UnmanagedType.IUnknown)] object punk, ref Guid riid, out uint cookie);
+        void RevokeInterfaceFromGlobal(uint cookie);
+        void GetInterfaceFromGlobal(uint cookie, ref Guid riid, [MarshalAs(UnmanagedType.IUnknown)] out object ppv);
     }
 
     [ComImport]

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
@@ -16,13 +17,18 @@ namespace FolderDiffCopy
             AppContext.SetSwitch("Switch.System.IO.UseLegacyPathHandling", false);
             AppContext.SetSwitch("Switch.System.IO.BlockLongPaths", false);
             bool selfTest = false;
+            bool phoneProbe = false;
             for (int i = 0; i < args.Length; i++)
             {
                 if (string.Equals(args[i], "--selftest", StringComparison.OrdinalIgnoreCase))
                     selfTest = true;
+                if (string.Equals(args[i], "--phone-probe", StringComparison.OrdinalIgnoreCase))
+                    phoneProbe = true;
             }
             if (selfTest)
                 return RunSelfTest();
+            if (phoneProbe)
+                return RunPhoneProbe();
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -77,6 +83,7 @@ namespace FolderDiffCopy
                 failed += Check(log, "phone folder names", delegate { TestPhoneNames(); });
                 failed += Check(log, "phone copy is one at a time", delegate { TestPhoneOneAtATime(); });
                 failed += Check(log, "phone path is not a disk folder", delegate { TestPhonePathNotDisk(); });
+                failed += Check(log, "phone shell item can be kept", delegate { TestPhoneGitCookie(); });
             }
             finally
             {
@@ -578,6 +585,96 @@ namespace FolderDiffCopy
             Need(!PhoneShell.UseAsDiskFolder(@"This PC\Phone\Internal shared storage"), "phone display name counted as a disk folder");
             Paths.Normalize("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}");
             Paths.Normalize(@"This PC\Phone\Internal shared storage");
+        }
+
+        static void TestPhoneGitCookie()
+        {
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            IShellItem item = PhoneShell.Open(windows);
+            Need(item != null, "could not open Windows folder");
+            uint cookie = 0;
+            IShellItem again = null;
+            try
+            {
+                cookie = PhoneShell.Register(item);
+                Need(cookie != 0, "git cookie was 0");
+                FolderSpot spot = FolderSpot.ForPhone("windows", windows, cookie);
+                again = PhoneShell.FromCookie(spot.GitCookie);
+                Need(again != null, "git retrieve failed");
+                PhoneShell.Revoke(spot);
+                cookie = 0;
+            }
+            finally
+            {
+                PhoneShell.Release(again);
+                PhoneShell.Release(item);
+                if (cookie != 0)
+                {
+                    FolderSpot leftover = FolderSpot.ForPhone("windows", windows, cookie);
+                    PhoneShell.Revoke(leftover);
+                }
+            }
+        }
+
+        static int RunPhoneProbe()
+        {
+            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "phone-probe.log");
+            var log = new StringBuilder();
+            log.AppendLine("Folder Difference Copy phone probe");
+            try
+            {
+                Type type = Type.GetTypeFromProgID("Shell.Application");
+                Need(type != null, "Shell.Application missing");
+                object shell = Activator.CreateInstance(type);
+                object thisPc = type.InvokeMember("NameSpace", BindingFlags.InvokeMethod, null, shell, new object[] { 0x11 });
+                Need(thisPc != null, "This PC missing");
+                object items = thisPc.GetType().InvokeMember("Items", BindingFlags.GetProperty, null, thisPc, null);
+                int count = Convert.ToInt32(items.GetType().InvokeMember("Count", BindingFlags.GetProperty, null, items, null));
+                log.AppendLine("This PC items: " + count.ToString());
+                int phones = 0;
+                for (int i = 0; i < count; i++)
+                {
+                    object fi = items.GetType().InvokeMember("Item", BindingFlags.InvokeMethod, null, items, new object[] { i });
+                    if (fi == null) continue;
+                    string name = fi.GetType().InvokeMember("Name", BindingFlags.GetProperty, null, fi, null) as string;
+                    string itemPath = fi.GetType().InvokeMember("Path", BindingFlags.GetProperty, null, fi, null) as string;
+                    bool isFolder = false;
+                    try { isFolder = Convert.ToBoolean(fi.GetType().InvokeMember("IsFolder", BindingFlags.GetProperty, null, fi, null)); }
+                    catch { }
+                    bool disk = PhoneShell.UseAsDiskFolder(itemPath);
+                    if (disk) continue;
+                    phones++;
+                    log.AppendLine("PHONE " + name);
+                    log.AppendLine("  path: " + itemPath);
+                    log.AppendLine("  folder: " + isFolder.ToString());
+                    if (string.IsNullOrEmpty(itemPath)) continue;
+                    object ns = type.InvokeMember("NameSpace", BindingFlags.InvokeMethod, null, shell, new object[] { itemPath });
+                    if (ns == null)
+                    {
+                        log.AppendLine("  children: could not open");
+                        continue;
+                    }
+                    object kids = ns.GetType().InvokeMember("Items", BindingFlags.GetProperty, null, ns, null);
+                    int kidCount = Convert.ToInt32(kids.GetType().InvokeMember("Count", BindingFlags.GetProperty, null, kids, null));
+                    log.AppendLine("  children: " + kidCount.ToString());
+                    int show = kidCount > 12 ? 12 : kidCount;
+                    for (int k = 0; k < show; k++)
+                    {
+                        object kid = kids.GetType().InvokeMember("Item", BindingFlags.InvokeMethod, null, kids, new object[] { k });
+                        if (kid == null) continue;
+                        string kidName = kid.GetType().InvokeMember("Name", BindingFlags.GetProperty, null, kid, null) as string;
+                        log.AppendLine("    " + kidName);
+                    }
+                }
+                if (phones == 0) log.AppendLine("No phone or portable device under This PC.");
+                log.AppendLine("DONE");
+            }
+            catch (Exception ex)
+            {
+                log.AppendLine("ERROR " + ex.GetType().Name + ": " + ex.Message);
+            }
+            File.WriteAllText(path, log.ToString());
+            return 0;
         }
 
         static void TestPhoneOneAtATime()
