@@ -789,6 +789,10 @@ namespace FolderDiffCopy
                 try
                 {
                     Need(PhoneShell.Alive(item), "Windows folder was not alive");
+                    IShellItem bound = PhoneShell.Bindable(item);
+                    Need(bound != null, "bindable clone missing");
+                    Need(PhoneShell.IsFolder(bound), "bindable clone was not a folder");
+                    if (!object.ReferenceEquals(bound, item)) PhoneShell.Release(bound);
                     FolderSpot spot = FolderSpot.ForPhone("windows", windows, 0);
                     spot.Live = item;
                     FolderSpot dropped = FolderSpot.ForPhone("gone", windows, 0);

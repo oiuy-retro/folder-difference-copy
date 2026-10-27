@@ -95,6 +95,12 @@ namespace FolderDiffCopy
             PhoneShell.Ui = System.Threading.SynchronizationContext.Current;
         }
 
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            PhoneShell.Ui = System.Threading.SynchronizationContext.Current;
+        }
+
         void Build()
         {
             tips.ShowAlways = true;
@@ -747,6 +753,7 @@ namespace FolderDiffCopy
 
         void BeginScan(bool preview)
         {
+            PhoneShell.Ui = System.Threading.SynchronizationContext.Current;
             FolderSpot a;
             FolderSpot b;
             string error;

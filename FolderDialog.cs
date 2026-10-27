@@ -205,6 +205,13 @@ namespace FolderDiffCopy
 
                 IShellItem result;
                 dialog.GetResult(out result);
+                IShellItem bound = PhoneShell.Bindable(result);
+                if (bound != null && !object.ReferenceEquals(bound, result))
+                {
+                    try { Marshal.ReleaseComObject(result); }
+                    catch { }
+                    result = bound;
+                }
                 FolderSpot spot = Classify(result);
                 if (spot != null && spot.IsPhone)
                 {

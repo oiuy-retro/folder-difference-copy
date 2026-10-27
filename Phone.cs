@@ -213,6 +213,7 @@ namespace FolderDiffCopy
         const int ShcontfNonFolders = 0x40;
         const int ShcontfIncludeHidden = 0x80;
         const int ShcontfStorage = 0x800;
+        const int ShcontfNavigationEnum = 0x1000;
         const string ThisPcFolder = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
         const uint FofNoUi = 0x4 | 0x10 | 0x200 | 0x400 | 0x2000;
         const uint FofxEarlyFailure = 0x00100000;
@@ -495,9 +496,40 @@ namespace FolderDiffCopy
 
         public static string ParsingName(IShellItem item)
         {
-            string name;
-            item.GetDisplayName(SigdnDesktopAbsoluteParsing, out name);
-            return name;
+            if (item == null) return null;
+            try
+            {
+                string name;
+                item.GetDisplayName(SigdnDesktopAbsoluteParsing, out name);
+                return name;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        public static IShellItem Bindable(IShellItem item)
+        {
+            if (item == null) return null;
+            IntPtr pidl = IntPtr.Zero;
+            try
+            {
+                int hr = SHGetIDListFromObject(item, out pidl);
+                if (hr < 0 || pidl == IntPtr.Zero) return item;
+                Guid iid = typeof(IShellItem).GUID;
+                IShellItem clone;
+                hr = SHCreateItemFromIDList(pidl, ref iid, out clone);
+                if (hr >= 0 && clone != null) return clone;
+            }
+            catch
+            {
+            }
+            finally
+            {
+                if (pidl != IntPtr.Zero) Marshal.FreeCoTaskMem(pidl);
+            }
+            return item;
         }
 
         public static string EditingName(IShellItem item)
@@ -516,34 +548,50 @@ namespace FolderDiffCopy
 
         public static bool IsFolder(IShellItem item)
         {
-            uint attributes;
-            item.GetAttributes(SfgaoFolder, out attributes);
-            return (attributes & SfgaoFolder) != 0;
+            if (item == null) return false;
+            try
+            {
+                uint attributes;
+                item.GetAttributes(SfgaoFolder, out attributes);
+                return (attributes & SfgaoFolder) != 0;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         // The real file name, extension included, even when Explorer hides extensions.
         public static string FileName(IShellItem item)
         {
-            IShellItem2 item2 = item as IShellItem2;
-            if (item2 != null)
+            if (item == null) return null;
+            try
             {
-                IntPtr text;
-                if (item2.GetString(ref KeyFileName, out text) == 0 && text != IntPtr.Zero)
+                IShellItem2 item2 = item as IShellItem2;
+                if (item2 != null)
                 {
-                    try
+                    IntPtr text;
+                    if (item2.GetString(ref KeyFileName, out text) == 0 && text != IntPtr.Zero)
                     {
-                        string name = Marshal.PtrToStringUni(text);
-                        if (!string.IsNullOrEmpty(name)) return name;
-                    }
-                    finally
-                    {
-                        Marshal.FreeCoTaskMem(text);
+                        try
+                        {
+                            string name = Marshal.PtrToStringUni(text);
+                            if (!string.IsNullOrEmpty(name)) return name;
+                        }
+                        finally
+                        {
+                            Marshal.FreeCoTaskMem(text);
+                        }
                     }
                 }
+                string display;
+                item.GetDisplayName(SigdnNormalDisplay, out display);
+                return display;
             }
-            string display;
-            item.GetDisplayName(SigdnNormalDisplay, out display);
-            return display;
+            catch
+            {
+                return null;
+            }
         }
 
         public static void ReadMeta(IShellItem item, out long size, out long written)
@@ -561,15 +609,13 @@ namespace FolderDiffCopy
         public static List<IShellItem> Children(IShellItem folder)
         {
             List<IShellItem> viaFolder = null;
-            Exception folderError = null;
             try { viaFolder = ChildrenByShellFolder(folder); }
-            catch (Exception ex) { folderError = ex; }
+            catch (Exception) { viaFolder = null; }
             if (viaFolder != null && viaFolder.Count > 0) return viaFolder;
 
             List<IShellItem> viaItems = null;
-            Exception itemsError = null;
             try { viaItems = ChildrenByEnumItems(folder); }
-            catch (Exception ex) { itemsError = ex; }
+            catch (Exception) { viaItems = null; }
             if (viaItems != null && viaItems.Count > 0)
             {
                 ReleaseList(viaFolder);
@@ -577,9 +623,8 @@ namespace FolderDiffCopy
             }
 
             List<IShellItem> viaApp = null;
-            Exception appError = null;
             try { viaApp = ChildrenByShellApp(folder); }
-            catch (Exception ex) { appError = ex; }
+            catch (Exception) { viaApp = null; }
             if (viaApp != null && viaApp.Count > 0)
             {
                 ReleaseList(viaFolder);
@@ -589,17 +634,13 @@ namespace FolderDiffCopy
             if (viaFolder != null) return viaFolder;
             if (viaItems != null) return viaItems;
             if (viaApp != null) return viaApp;
-            if (folderError != null) throw folderError;
-            if (itemsError != null) throw itemsError;
-            if (appError != null) throw appError;
             return new List<IShellItem>();
         }
 
         static List<IShellItem> ChildrenByShellApp(IShellItem folder)
         {
             var list = new List<IShellItem>();
-            object ns = ShellNameSpace(ParsingName(folder));
-            if (ns == null) ns = ShellNameSpace(EditingName(folder));
+            object ns = NamespaceFromItem(folder);
             if (ns == null) return list;
             object items = ShellGet(ns, "Items");
             if (items == null) return list;
@@ -743,7 +784,7 @@ namespace FolderDiffCopy
             IntPtr parentPidl = IntPtr.Zero;
             try
             {
-                int flags = ShcontfFolders | ShcontfNonFolders | ShcontfIncludeHidden | ShcontfStorage;
+                int flags = ShcontfFolders | ShcontfNonFolders | ShcontfIncludeHidden | ShcontfStorage | ShcontfNavigationEnum;
                 int hrEnum = shellFolder.EnumObjects(GetDesktopWindow(), flags, out enumerator);
                 if (hrEnum < 0) Marshal.ThrowExceptionForHR(hrEnum);
                 if (enumerator == null) return list;
@@ -808,19 +849,8 @@ namespace FolderDiffCopy
         // and never treated as real files.
         public static void Scan(PhoneTree tree, Dictionary<string, PhoneEntry> files, HashSet<string> dirs, bool countAsA, ScanStatus status)
         {
-            IShellItem root = tree.Live;
-            if (root == null)
-            {
-                try
-                {
-                    root = OpenOrThrow(tree.Root, tree.RootCookie, tree.RootText, null);
-                    tree.Live = root;
-                }
-                catch (Exception)
-                {
-                    root = null;
-                }
-            }
+            IShellItem root = RootItem(tree);
+            if (root != null && tree.Live == null) tree.Live = root;
             if (root != null)
             {
                 try
@@ -834,17 +864,90 @@ namespace FolderDiffCopy
                 }
                 if (files.Count > 0 || dirs.Count > 0 || status.Cancel) return;
             }
-            ScanByDisplayName(tree, files, dirs, countAsA, status);
+            try
+            {
+                ScanByDisplayName(tree, files, dirs, countAsA, status);
+            }
+            catch (Exception)
+            {
+                if (tree.Live != null || tree.RootCookie != 0) return;
+                throw;
+            }
+        }
+
+        static bool OnUiThread()
+        {
+            return Ui != null && object.ReferenceEquals(Ui, SynchronizationContext.Current);
+        }
+
+        static IShellItem RootItem(PhoneTree tree)
+        {
+            if (tree == null) return null;
+            if (OnUiThread() && tree.Live != null) return tree.Live;
+            IShellItem fromGit = FromCookie(tree.RootCookie);
+            if (fromGit != null) return fromGit;
+            if (tree.Live != null) return tree.Live;
+            IShellItem opened = Open(tree.Root);
+            if (opened != null) return opened;
+            return Open(tree.RootText);
         }
 
         static void ScanByDisplayName(PhoneTree tree, Dictionary<string, PhoneEntry> files, HashSet<string> dirs, bool countAsA, ScanStatus status)
         {
-            object ns = FindPhoneNamespace(tree.Root, tree.RootText);
+            object ns = null;
+            if (tree.Live != null) ns = NamespaceFromItem(tree.Live);
+            if (ns == null) ns = FindPhoneNamespace(tree.Root, tree.RootText);
             if (ns == null) throw new PhoneException(PhoneErrors.CannotReach);
             IShellItem parent = tree.Live;
             if (parent == null) parent = Open(tree.Root);
             if (parent == null) parent = Open(tree.RootText);
             ScanShellFolder(ns, "", parent, tree, files, dirs, countAsA, status);
+        }
+
+        static object NamespaceFromItem(IShellItem item)
+        {
+            if (item == null) return null;
+            object ns = ShellNameSpace(EditingName(item));
+            if (ns != null) return ns;
+            ns = ShellNameSpace(ParsingName(item));
+            if (ns != null) return ns;
+            string[] chain = DisplayChain(item);
+            ns = WalkParts(ShellNameSpaceById(0x11), chain, 0);
+            if (ns != null) return ns;
+            return WalkFromThisPc(EditingName(item));
+        }
+
+        static string[] DisplayChain(IShellItem item)
+        {
+            var names = new List<string>();
+            IShellItem current = item;
+            bool own = false;
+            try
+            {
+                for (int depth = 0; depth < 24; depth++)
+                {
+                    string parse = null;
+                    try { parse = ParsingName(current); }
+                    catch { parse = null; }
+                    if (IsThisPcOrPortableDevices(parse)) break;
+                    string name = null;
+                    try { name = FileName(current); }
+                    catch { name = null; }
+                    if (!string.IsNullOrEmpty(name)) names.Insert(0, name);
+                    IShellItem parent = null;
+                    try { current.GetParent(out parent); }
+                    catch { break; }
+                    if (parent == null) break;
+                    if (own) Release(current);
+                    current = parent;
+                    own = true;
+                }
+            }
+            finally
+            {
+                if (own) Release(current);
+            }
+            return names.ToArray();
         }
 
         static object FindPhoneNamespace(string root, string rootText)
@@ -1022,7 +1125,7 @@ namespace FolderDiffCopy
             }
             catch (Exception ex)
             {
-                if (relDir.Length == 0) throw new PhoneException(PhoneErrors.Describe(ex));
+                if (relDir.Length == 0) return;
                 status.Unreadable++;
                 if (status.FirstProblem == null) status.FirstProblem = PhoneErrors.Describe(ex);
                 return;
@@ -1031,7 +1134,9 @@ namespace FolderDiffCopy
             foreach (IShellItem child in children)
             {
                 if (status.Cancel) return;
-                string name = FileName(child);
+                string name = null;
+                try { name = FileName(child); }
+                catch { name = null; }
                 if (string.IsNullOrEmpty(name))
                 {
                     Release(child);
