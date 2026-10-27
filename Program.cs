@@ -791,7 +791,10 @@ namespace FolderDiffCopy
                     Need(PhoneShell.Alive(item), "Windows folder was not alive");
                     FolderSpot spot = FolderSpot.ForPhone("windows", windows, 0);
                     spot.Live = item;
-                    PhoneShell.DropDead(spot);
+                    FolderSpot dropped = FolderSpot.ForPhone("gone", windows, 0);
+                    dropped.Live = item;
+                    PhoneShell.ForgetFolder(dropped);
+                    Need(dropped.Live == null, "ForgetFolder left the live item");
                     Need(spot.Live != null, "a live folder was dropped");
                 }
                 finally

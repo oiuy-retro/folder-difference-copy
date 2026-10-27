@@ -895,8 +895,11 @@ namespace FolderDiffCopy
             if (IsDisposed) return;
             if (error != null)
             {
-                PhoneShell.DropDead(phoneA);
-                PhoneShell.DropDead(phoneB);
+                if (PhoneErrors.Describe(error) == PhoneErrors.Unplugged)
+                {
+                    PhoneShell.ForgetFolder(phoneA);
+                    PhoneShell.ForgetFolder(phoneB);
+                }
                 previewOnly = false;
                 previewedA = null;
                 previewedB = null;

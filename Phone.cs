@@ -444,7 +444,7 @@ namespace FolderDiffCopy
 
         public static IShellItem OpenOrThrow(string parsingName, uint cookie, string displayText, IShellItem live)
         {
-            if (Alive(live)) return live;
+            if (live != null) return live;
             IShellItem item = FromCookie(cookie);
             if (item == null) item = Open(parsingName);
             if (item == null) item = Open(displayText);
@@ -457,8 +457,8 @@ namespace FolderDiffCopy
             if (item == null) return false;
             try
             {
-                uint attributes;
-                item.GetAttributes(0, out attributes);
+                string name;
+                item.GetDisplayName(SigdnNormalDisplay, out name);
                 return true;
             }
             catch
@@ -467,29 +467,23 @@ namespace FolderDiffCopy
             }
         }
 
-        public static void DropDead(FolderSpot spot)
+        public static void ForgetFolder(FolderSpot spot)
         {
             if (spot == null) return;
-            if (spot.Live != null && !Alive(spot.Live))
+            spot.Live = null;
+            if (spot.GitCookie != 0)
             {
-                spot.Live = null;
-                if (spot.GitCookie != 0)
-                {
-                    try { GitTable().RevokeInterfaceFromGlobal(spot.GitCookie); }
-                    catch { }
-                    spot.GitCookie = 0;
-                }
+                try { GitTable().RevokeInterfaceFromGlobal(spot.GitCookie); }
+                catch { }
+                spot.GitCookie = 0;
             }
         }
 
-        public static void DropDead(PhoneTree tree)
+        public static void ForgetTree(PhoneTree tree)
         {
             if (tree == null) return;
-            if (tree.Live != null && !Alive(tree.Live))
-            {
-                tree.Live = null;
-                lock (tree.Gate) tree.ForgetLiveItems();
-            }
+            tree.Live = null;
+            lock (tree.Gate) tree.ForgetLiveItems();
         }
 
         public static void Release(object item)
@@ -814,7 +808,6 @@ namespace FolderDiffCopy
         // and never treated as real files.
         public static void Scan(PhoneTree tree, Dictionary<string, PhoneEntry> files, HashSet<string> dirs, bool countAsA, ScanStatus status)
         {
-            DropDead(tree);
             IShellItem root = tree.Live;
             if (root == null)
             {
@@ -834,9 +827,10 @@ namespace FolderDiffCopy
                 {
                     ScanFolder(root, "", tree, files, dirs, countAsA, status);
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    DropDead(tree);
+                    if (PhoneErrors.Describe(ex) == PhoneErrors.Unplugged)
+                        ForgetTree(tree);
                 }
                 if (files.Count > 0 || dirs.Count > 0 || status.Cancel) return;
             }
@@ -847,7 +841,7 @@ namespace FolderDiffCopy
         {
             object ns = FindPhoneNamespace(tree.Root, tree.RootText);
             if (ns == null) throw new PhoneException(PhoneErrors.CannotReach);
-            IShellItem parent = Alive(tree.Live) ? tree.Live : null;
+            IShellItem parent = tree.Live;
             if (parent == null) parent = Open(tree.Root);
             if (parent == null) parent = Open(tree.RootText);
             ScanShellFolder(ns, "", parent, tree, files, dirs, countAsA, status);
@@ -1106,8 +1100,7 @@ namespace FolderDiffCopy
             if (live != null) return live;
             if (string.IsNullOrEmpty(rel))
             {
-                if (Alive(tree.Live)) return tree.Live;
-                tree.Live = null;
+                if (tree.Live != null) return tree.Live;
                 IShellItem opened = OpenOrThrow(tree.Root, tree.RootCookie, tree.RootText, null);
                 tree.Live = opened;
                 return opened;
@@ -1791,7 +1784,6 @@ namespace FolderDiffCopy
 
         static PhoneTree NewTree(FolderSpot spot)
         {
-            PhoneShell.DropDead(spot);
             PhoneTree tree = new PhoneTree();
             tree.Root = spot.PhoneItem;
             tree.RootText = spot.Text;
