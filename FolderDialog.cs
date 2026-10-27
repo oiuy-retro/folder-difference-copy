@@ -263,18 +263,6 @@ namespace FolderDiffCopy
         }
 
         [ComImport]
-        [Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe")]
-        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        interface IShellItem
-        {
-            void BindToHandler(IntPtr bind, ref Guid bhid, ref Guid iid, out IntPtr ppv);
-            void GetParent(out IShellItem parent);
-            void GetDisplayName(uint sigdn, [MarshalAs(UnmanagedType.LPWStr)] out string name);
-            void GetAttributes(uint mask, out uint attributes);
-            void Compare(IShellItem other, uint hint, out int order);
-        }
-
-        [ComImport]
         [Guid("d57c7288-d4ad-4768-be02-9d969532d960")]
         [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
         interface IFileOpenDialog

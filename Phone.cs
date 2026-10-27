@@ -58,6 +58,7 @@ namespace FolderDiffCopy
     internal sealed class PhoneTree
     {
         public string Root;
+        public string RootText;
         public uint RootCookie;
         public readonly Dictionary<string, string> Dirs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public readonly Dictionary<string, string> Files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -108,7 +109,7 @@ namespace FolderDiffCopy
 
     internal static class PhoneErrors
     {
-        public const string CannotReach = "Can't reach the phone folder. Plug the phone in, unlock it, and set its USB mode to File transfer, then try again.";
+        public const string CannotReach = "Windows can see the phone, but that folder could not be opened. Unplug the phone, plug it back in, pick the folder again, then press Preview.";
         public const string Unplugged = "The phone was unplugged or stopped responding. Plug it back in, unlock it, and run the copy again. Unfinished files are cleaned up on the next run.";
         public const string Locked = "The phone refused access. Unlock the phone, make sure its USB mode is File transfer, and try again.";
         public const string Full = "The phone is out of space.";
@@ -280,11 +281,37 @@ namespace FolderDiffCopy
                 Guid iid = typeof(IShellItem).GUID;
                 object obj;
                 GitTable().GetInterfaceFromGlobal(cookie, ref iid, out obj);
-                return obj as IShellItem;
+                IShellItem item = AsShellItem(obj);
+                if (item != null) return item;
+                Guid unk = new Guid("00000000-0000-0000-C000-000000000046");
+                GitTable().GetInterfaceFromGlobal(cookie, ref unk, out obj);
+                return AsShellItem(obj);
             }
             catch
             {
                 return null;
+            }
+        }
+
+        public static IShellItem AsShellItem(object obj)
+        {
+            if (obj == null) return null;
+            IShellItem direct = obj as IShellItem;
+            if (direct != null) return direct;
+            IntPtr unk = IntPtr.Zero;
+            try
+            {
+                unk = Marshal.GetIUnknownForObject(obj);
+                if (unk == IntPtr.Zero) return null;
+                return (IShellItem)Marshal.GetTypedObjectForIUnknown(unk, typeof(IShellItem));
+            }
+            catch
+            {
+                return null;
+            }
+            finally
+            {
+                if (unk != IntPtr.Zero) Marshal.Release(unk);
             }
         }
 
@@ -299,22 +326,48 @@ namespace FolderDiffCopy
 
         public static IShellItem Open(string parsingName)
         {
+            if (string.IsNullOrEmpty(parsingName)) return null;
             Guid iid = typeof(IShellItem).GUID;
             IShellItem item;
             int hr = SHCreateItemFromParsingName(parsingName, IntPtr.Zero, ref iid, out item);
-            if (hr < 0 || item == null) return null;
-            return item;
+            if (hr >= 0 && item != null) return item;
+            return OpenParsed(parsingName);
+        }
+
+        static IShellItem OpenParsed(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return null;
+            IntPtr pidl = IntPtr.Zero;
+            int hr = SHParseDisplayName(text, IntPtr.Zero, out pidl, 0, IntPtr.Zero);
+            if (hr < 0 || pidl == IntPtr.Zero) return null;
+            try
+            {
+                Guid iid = typeof(IShellItem).GUID;
+                IShellItem item;
+                hr = SHCreateItemFromIDList(pidl, ref iid, out item);
+                return hr >= 0 ? item : null;
+            }
+            finally
+            {
+                Marshal.FreeCoTaskMem(pidl);
+            }
         }
 
         public static IShellItem OpenOrThrow(string parsingName)
         {
-            return OpenOrThrow(parsingName, 0);
+            return OpenOrThrow(parsingName, 0, null);
         }
 
         public static IShellItem OpenOrThrow(string parsingName, uint cookie)
         {
+            return OpenOrThrow(parsingName, cookie, null);
+        }
+
+        public static IShellItem OpenOrThrow(string parsingName, uint cookie, string displayText)
+        {
             IShellItem item = FromCookie(cookie);
             if (item == null) item = Open(parsingName);
+            if (item == null) item = Open(displayText);
             if (item == null) throw new PhoneException(PhoneErrors.CannotReach);
             return item;
         }
@@ -580,10 +633,9 @@ namespace FolderDiffCopy
         // and never treated as real files.
         public static void Scan(PhoneTree tree, Dictionary<string, PhoneEntry> files, HashSet<string> dirs, bool countAsA, ScanStatus status)
         {
-            IShellItem root = OpenOrThrow(tree.Root, tree.RootCookie);
+            IShellItem root = OpenOrThrow(tree.Root, tree.RootCookie, tree.RootText);
             try
             {
-                if (!IsFolder(root)) throw new PhoneException(PhoneErrors.CannotReach);
                 ScanFolder(root, "", tree, files, dirs, countAsA, status);
             }
             finally
@@ -869,6 +921,14 @@ namespace FolderDiffCopy
             ref Guid iid,
             [MarshalAs(UnmanagedType.Interface)] out IShellItem item);
 
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+        static extern int SHParseDisplayName(
+            string name,
+            IntPtr bind,
+            out IntPtr pidl,
+            uint attributesIn,
+            IntPtr attributesOut);
+
         [DllImport("shell32.dll", PreserveSig = true)]
         static extern int SHGetIDListFromObject(
             [MarshalAs(UnmanagedType.IUnknown)] object punk,
@@ -1063,6 +1123,7 @@ namespace FolderDiffCopy
         {
             PhoneTree tree = new PhoneTree();
             tree.Root = spot.PhoneItem;
+            tree.RootText = spot.Text;
             tree.RootCookie = spot.GitCookie;
             return tree;
         }
