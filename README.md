@@ -38,6 +38,21 @@ Self-test (exits 0 on success):
 "Folder Difference Copy.exe" --selftest
 ```
 
+## Settings file
+
+The app keeps its settings in `configuration.conf`, a plain text file next to the exe. If the file is missing, the app writes a commented copy on first run. Lines starting with `#` are comments, and you can edit the file in Notepad while the app is closed.
+
+```ini
+[tools]
+# Folder Difference Copy doesn't use any outside programs.
+
+[folders]
+a = D:\Photos
+b = E:\Backup\Photos
+```
+
+`[folders]` holds the folder each Browse button opens at. After you pick a folder, the app updates only that line and leaves the rest of the file alone. If a saved folder no longer exists, Browse opens at the nearest folder above it that still exists. If the exe's folder can't be written to, for example under Program Files, the app saves to `%APPDATA%\Folder Difference Copy\configuration.conf` instead, and values there win over the ones next to the exe. Relative paths start from the exe's folder, and `%VARS%` such as `%USERPROFILE%` are expanded.
+
 ## Build
 
 There is no .NET SDK requirement. `build.bat` uses the framework compiler:
@@ -47,7 +62,7 @@ build.bat
 copy FolderDiffCopy.exe dist\"Folder Difference Copy.exe"
 ```
 
-Sources: `Program.cs`, `Native.cs`, `Engine.cs`, `Phone.cs`, `FolderDialog.cs`, `Win7Ux.cs`, `FileList.cs`, `MainForm.cs`, plus `app.manifest` and `app.ico`.
+Sources: `Program.cs`, `Native.cs`, `Engine.cs`, `Phone.cs`, `Config.cs`, `FolderDialog.cs`, `Win7Ux.cs`, `FileList.cs`, `MainForm.cs`, plus `app.manifest` and `app.ico`.
 
 Compiler: `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe` (C# 5 / .NET 4).
 
