@@ -130,6 +130,71 @@ namespace FolderDiffCopy
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         static extern bool MoveFileEx(string existing, string destination, int flags);
 
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint length, uint flags);
+
+        const uint ReadAttributesAccess = 0x80;
+        const uint BackupSemantics = 0x02000000;
+        const uint FileNameNormalized = 0x0;
+
+        // The real location of a folder on disk, with junctions, symbolic links, subst drives,
+        // and mapped network drives followed, as a plain path such as C:\Music or
+        // \\server\share\Music. A folder that does not exist yet is resolved through its
+        // nearest existing parent. Returns null when Windows cannot tell.
+        public static string RealPath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return null;
+            string current = Pretty(path);
+            if (current.Length > 3) current = current.TrimEnd('\\');
+            string tail = "";
+            for (int guard = 0; guard < 4096; guard++)
+            {
+                string resolved = FinalPathOfDirectory(ToExtended(current));
+                if (resolved != null)
+                {
+                    resolved = Pretty(resolved);
+                    if (tail.Length == 0) return resolved;
+                    return resolved.TrimEnd('\\') + "\\" + tail;
+                }
+                string trimmed = current.TrimEnd('\\');
+                int cut = trimmed.LastIndexOf('\\');
+                if (cut <= 1) return null;
+                string name = trimmed.Substring(cut + 1);
+                if (name.Length == 0) return null;
+                tail = tail.Length == 0 ? name : name + "\\" + tail;
+                current = trimmed.Substring(0, cut);
+                if (current.Length == 2 && current[1] == ':') current += "\\";
+            }
+            return null;
+        }
+
+        static string FinalPathOfDirectory(string extendedPath)
+        {
+            if (!DirExists(extendedPath)) return null;
+            SafeFileHandle handle = CreateFile(extendedPath, ReadAttributesAccess, ShareAll, IntPtr.Zero, OpenExisting, BackupSemantics, IntPtr.Zero);
+            try
+            {
+                if (handle.IsInvalid) return null;
+                var buffer = new StringBuilder(1024);
+                uint length = GetFinalPathNameByHandle(handle, buffer, (uint)buffer.Capacity, FileNameNormalized);
+                if (length >= buffer.Capacity)
+                {
+                    buffer = new StringBuilder((int)length + 1);
+                    length = GetFinalPathNameByHandle(handle, buffer, (uint)buffer.Capacity, FileNameNormalized);
+                }
+                if (length == 0 || length >= buffer.Capacity) return null;
+                return buffer.ToString(0, (int)length);
+            }
+            catch (EntryPointNotFoundException)
+            {
+                return null;
+            }
+            finally
+            {
+                handle.Dispose();
+            }
+        }
+
         public static string ToExtended(string fullPath)
         {
             if (string.IsNullOrEmpty(fullPath)) return fullPath;
