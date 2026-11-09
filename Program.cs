@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
@@ -17,13 +18,18 @@ namespace FolderDiffCopy
             AppContext.SetSwitch("Switch.System.IO.UseLegacyPathHandling", false);
             AppContext.SetSwitch("Switch.System.IO.BlockLongPaths", false);
             bool selfTest = false;
+            bool phoneProbe = false;
             for (int i = 0; i < args.Length; i++)
             {
                 if (string.Equals(args[i], "--selftest", StringComparison.OrdinalIgnoreCase))
                     selfTest = true;
+                if (string.Equals(args[i], "--phone-probe", StringComparison.OrdinalIgnoreCase))
+                    phoneProbe = true;
             }
             if (selfTest)
                 return RunSelfTest();
+            if (phoneProbe)
+                return RunPhoneProbe();
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -79,6 +85,20 @@ namespace FolderDiffCopy
                 failed += Check(log, "refuses nested folders through links", delegate { TestRejectNestedLinks(root); });
                 failed += Check(log, "folder text is cleaned up", delegate { TestNormalize(); });
                 failed += Check(log, "stop at the end of a compare", delegate { TestStopAtCompareEnd(); });
+                failed += Check(log, "phone profiles lock parallelization", delegate { TestPhoneProfiles(); });
+                failed += Check(log, "phone compare by size", delegate { TestPhonePlan(); });
+                failed += Check(log, "phone folder names", delegate { TestPhoneNames(); });
+                failed += Check(log, "phone copy is one at a time", delegate { TestPhoneOneAtATime(); });
+                failed += Check(log, "phone path is not a disk folder", delegate { TestPhonePathNotDisk(); });
+                failed += Check(log, "phone shell item can be kept", delegate { TestPhoneGitCookie(); });
+                failed += Check(log, "phone relative child", delegate { TestPhoneRelativeChild(); });
+                failed += Check(log, "phone copy to a disk folder", delegate { TestPhoneCopyToFolder(root); });
+                failed += Check(log, "config file keeps hand edits", delegate { TestConfigEdits(); });
+                failed += Check(log, "config remembers folders", delegate { TestConfigFolders(root); });
+                failed += Check(log, "phone part file is renamed", delegate { TestPhonePartRename(root); });
+                failed += Check(log, "phone real name is only kept when it is the new copy", delegate { TestPhoneNewCopyRules(); });
+                failed += Check(log, "phone folder file probe", delegate { TestPhoneProbeFile(root); });
+                failed += Check(log, "phone shell item alive check", delegate { TestPhoneAlive(); });
             }
             finally
             {
@@ -468,6 +488,443 @@ namespace FolderDiffCopy
                 Need(found.Enabled, "both ways should be editable");
                 form.Hide();
             }
+        }
+
+        static void TestPhoneProfiles()
+        {
+            using (MainForm form = new MainForm())
+            {
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-2400, -2400);
+                form.Show();
+                Application.DoEvents();
+                ComboBox profile = null;
+                NumericUpDown parallel = null;
+                foreach (Control c in form.Controls)
+                {
+                    if (c is ComboBox) profile = (ComboBox)c;
+                    if (c is NumericUpDown) parallel = (NumericUpDown)c;
+                }
+                Need(profile != null && parallel != null, "missing profile or parallelization");
+                string[] phones = new string[] {
+                    "Hard drive to phone",
+                    "Solid-state drive to phone",
+                    "Phone to hard drive",
+                    "Phone to solid-state drive"
+                };
+                foreach (string name in phones)
+                {
+                    int index = profile.Items.IndexOf(name);
+                    Need(index > 0, "missing profile " + name);
+                    profile.SelectedIndex = profile.Items.IndexOf("Solid-state drive to solid-state drive");
+                    Application.DoEvents();
+                    Need(parallel.Enabled, "parallelization should unlock for drives");
+                    profile.SelectedIndex = index;
+                    Application.DoEvents();
+                    Need(!parallel.Enabled, name + " should grey out parallelization");
+                    Need(parallel.Value == 1, name + " should copy one file at a time");
+                }
+                profile.SelectedIndex = 0;
+                Application.DoEvents();
+                Need(parallel.Enabled, "parallelization should unlock again");
+                form.Hide();
+            }
+        }
+
+        static void TestPhonePlan()
+        {
+            var a = new Dictionary<string, PhoneEntry>(StringComparer.OrdinalIgnoreCase);
+            var b = new Dictionary<string, PhoneEntry>(StringComparer.OrdinalIgnoreCase);
+            long hour = 36000000000L;
+            long now = DateTime.UtcNow.ToFileTimeUtc();
+            a["same.jpg"] = Entry(100, now);
+            b["same.jpg"] = Entry(100, now - 5 * hour);
+            a["bigger.jpg"] = Entry(200, now);
+            b["bigger.jpg"] = Entry(150, now);
+            a["only-a.jpg"] = Entry(10, now);
+            b["only-b.jpg"] = Entry(20, now);
+            a["phone-newer.txt"] = Entry(5, now - 3 * hour);
+            b["phone-newer.txt"] = Entry(6, now);
+            a["close.txt"] = Entry(7, now);
+            b["close.txt"] = Entry(8, now + hour / 2);
+
+            int unchanged;
+            List<PlannedCopy> oneWay = PhoneDiff.Plan(a, b, false, out unchanged);
+            Need(unchanged == 1, "one way unchanged " + unchanged);
+            Need(oneWay.Count == 4, "one way count " + oneWay.Count);
+            foreach (PlannedCopy copy in oneWay)
+                Need(!copy.ToA, "one way copied toward A: " + copy.Rel);
+
+            List<PlannedCopy> both = PhoneDiff.Plan(a, b, true, out unchanged);
+            Need(unchanged == 1, "both ways unchanged " + unchanged);
+            Need(both.Count == 5, "both ways count " + both.Count);
+            foreach (PlannedCopy copy in both)
+            {
+                if (copy.Rel == "only-b.jpg" || copy.Rel == "phone-newer.txt")
+                    Need(copy.ToA, copy.Rel + " should go to A");
+                else
+                    Need(!copy.ToA, copy.Rel + " should go to B");
+            }
+        }
+
+        static PhoneEntry Entry(long size, long time)
+        {
+            PhoneEntry entry = new PhoneEntry();
+            entry.Size = size;
+            entry.WriteTime = time;
+            return entry;
+        }
+
+        static void TestPhoneNames()
+        {
+            string device = @"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\\?\usb#vid_18d1&pid_4ee1#0123456789#{6ac27878-a6fa-4155-ba85-f98f491d4f33}";
+            string folder = device + @"\SID-{10001,,123456789}\{00000016-0001-0001-0000-000000000000}";
+            Need(PhoneShell.IsPhoneItem(device), "device is a phone item");
+            Need(PhoneShell.IsPhoneDevice(device), "device root not detected");
+            Need(PhoneShell.IsPhoneItem(folder), "folder is a phone item");
+            Need(!PhoneShell.IsPhoneDevice(folder), "folder taken for the device");
+            Need(!PhoneShell.IsPhoneItem(@"::{031E4825-7B94-4DC3-B131-E946B44C8DD5}\Documents.library-ms"), "library taken for a phone");
+            Need(!PhoneShell.IsPhoneItem(@"C:\Music"), "drive folder taken for a phone");
+            Need(PhoneShell.IsThisPcOrPortableDevices("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"), "This PC not recognized");
+            Need(PhoneShell.IsThisPcOrPortableDevices("::{35786D3C-B075-49B9-88DD-029876E11C01}"), "portable devices folder not recognized");
+            Need(!PhoneShell.IsThisPcOrPortableDevices(device), "phone device taken for This PC");
+        }
+
+        static void TestPhonePathNotDisk()
+        {
+            Need(PhoneShell.UseAsDiskFolder(Environment.GetFolderPath(Environment.SpecialFolder.Windows)), "Windows folder should count as a disk folder");
+            Need(!PhoneShell.UseAsDiskFolder(null), "null counted as a disk folder");
+            Need(!PhoneShell.UseAsDiskFolder(""), "empty counted as a disk folder");
+            Need(!PhoneShell.UseAsDiskFolder(@"\\?\usb#vid_18d1&pid_4ee1#missing#{6ac27878-a6fa-4155-ba85-f98f491d4f33}"), "missing phone path counted as a disk folder");
+            Need(!PhoneShell.UseAsDiskFolder(@"This PC\Phone\Internal shared storage"), "phone display name counted as a disk folder");
+            Paths.Normalize("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}");
+            Paths.Normalize(@"This PC\Phone\Internal shared storage");
+        }
+
+        static void TestPhoneGitCookie()
+        {
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            IShellItem item = PhoneShell.Open(windows);
+            Need(item != null, "could not open Windows folder");
+            uint cookie = 0;
+            IShellItem again = null;
+            try
+            {
+                cookie = PhoneShell.Register(item);
+                Need(cookie != 0, "git cookie was 0");
+                FolderSpot spot = FolderSpot.ForPhone("windows", windows, cookie);
+                again = PhoneShell.FromCookie(spot.GitCookie);
+                Need(again != null, "git retrieve failed");
+                PhoneShell.Revoke(spot);
+                cookie = 0;
+            }
+            finally
+            {
+                PhoneShell.Release(again);
+                PhoneShell.Release(item);
+                if (cookie != 0)
+                {
+                    FolderSpot leftover = FolderSpot.ForPhone("windows", windows, cookie);
+                    PhoneShell.Revoke(leftover);
+                }
+            }
+        }
+
+        static void TestPhoneRelativeChild()
+        {
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            PhoneShell.RunSta(delegate
+            {
+                IShellItem parent = PhoneShell.Open(windows);
+                Need(parent != null, "could not open Windows folder");
+                IShellItem child = null;
+                try
+                {
+                    child = PhoneShell.RelativeChild(parent, "System32");
+                    Need(child != null, "relative child missing");
+                    Need(PhoneShell.IsFolder(child), "System32 should be a folder");
+                }
+                finally
+                {
+                    PhoneShell.Release(child);
+                    PhoneShell.Release(parent);
+                }
+            });
+        }
+
+        static void TestConfigEdits()
+        {
+            string text = "# my note\r\n[tools]\r\nffmpeg = auto\r\n\r\n[folders]\r\n# keep me\r\na = C:\\Old\r\n\r\n[other]\r\nx = 1\r\n";
+            string updated = Config.UpdateText(text, "folders", "A", "D:\\New");
+            string expected = "# my note\r\n[tools]\r\nffmpeg = auto\r\n\r\n[folders]\r\n# keep me\r\nA = D:\\New\r\n\r\n[other]\r\nx = 1\r\n";
+            if (updated != expected) throw new Exception("replace changed other lines:\n" + updated);
+            updated = Config.UpdateText(text, "folders", "b", "E:\\B");
+            if (!updated.Contains("a = C:\\Old\r\nb = E:\\B\r\n\r\n[other]")) throw new Exception("add went to the wrong place:\n" + updated);
+            updated = Config.UpdateText("[tools]\n", "folders", "a", "C:\\X");
+            if (updated != "[tools]\n\n[folders]\na = C:\\X\n") throw new Exception("new section wrong:\n" + updated);
+        }
+
+        static void TestConfigFolders(string root)
+        {
+            string dir = Path.Combine(root, "conf");
+            Directory.CreateDirectory(dir);
+            string main = Path.Combine(dir, Config.FileName);
+            string fallback = Path.Combine(Path.Combine(dir, "appdata"), Config.FileName);
+            var config = new Config(main, fallback);
+            config.Load();
+            if (!File.Exists(main)) throw new Exception("template not written");
+            if (!string.IsNullOrEmpty(config.GetPath("folders", "a"))) throw new Exception("template a not empty");
+            string picked = Path.Combine(dir, "picked");
+            Directory.CreateDirectory(picked);
+            config.Set("folders", "a", picked);
+            var again = new Config(main, fallback);
+            again.Load();
+            if (!string.Equals(again.GetPath("folders", "a"), picked, StringComparison.OrdinalIgnoreCase)) throw new Exception("a not remembered");
+            if (Config.NearestExisting(Path.Combine(picked, "gone\\deeper")) != picked) throw new Exception("nearest parent wrong");
+            File.WriteAllText(main, "[folders]\r\nb = sub\r\n");
+            again.Load();
+            if (!string.Equals(again.GetPath("folders", "b"), Path.Combine(dir, "sub"), StringComparison.OrdinalIgnoreCase)) throw new Exception("relative path not from config folder");
+        }
+
+        static void TestPhoneCopyToFolder(string root)
+        {
+            string dir = Path.Combine(root, "phone-copy");
+            string src = Path.Combine(dir, "src.txt");
+            string destDir = Path.Combine(dir, "dest");
+            Directory.CreateDirectory(destDir);
+            File.WriteAllText(src, "hello-phone-copy");
+            PhoneShell.RunSta(delegate
+            {
+                IShellItem source = PhoneShell.Open(src);
+                IShellItem folder = PhoneShell.Open(destDir);
+                Need(source != null && folder != null, "could not open copy folders");
+                try
+                {
+                    string made = PhoneShell.CopyToFolder(source, folder, "out.txt", null, null);
+                    Need(!string.IsNullOrEmpty(made), "copy did not return a path");
+                }
+                finally
+                {
+                    PhoneShell.Release(source);
+                    PhoneShell.Release(folder);
+                }
+            });
+            Need(File.ReadAllText(Path.Combine(destDir, "out.txt")) == "hello-phone-copy", "copied file contents");
+        }
+
+        static void TestPhonePartRename(string root)
+        {
+            string dir = Path.Combine(root, "phone-part");
+            string src = Path.Combine(dir, "src.txt");
+            string destDir = Path.Combine(dir, "dest");
+            Directory.CreateDirectory(destDir);
+            File.WriteAllText(src, "part-rename");
+            PhoneShell.RunSta(delegate
+            {
+                IShellItem source = PhoneShell.Open(src);
+                IShellItem folder = PhoneShell.Open(destDir);
+                Need(source != null && folder != null, "could not open part-rename folders");
+                IShellItem part = null;
+                IShellItem kept = null;
+                try
+                {
+                    PhoneShell.CopyToFolder(source, folder, "out.txt" + PhoneShell.PartSuffix, null, null);
+                    part = PhoneShell.FindChild(folder, "out.txt" + PhoneShell.PartSuffix);
+                    Need(part != null, "part file missing");
+                    PhoneShell.RenameItem(part, "out.txt");
+                    kept = PhoneShell.FindChild(folder, "out.txt");
+                    Need(kept != null, "renamed file missing");
+                }
+                finally
+                {
+                    PhoneShell.Release(part);
+                    PhoneShell.Release(kept);
+                    PhoneShell.Release(source);
+                    PhoneShell.Release(folder);
+                }
+            });
+            Need(File.ReadAllText(Path.Combine(destDir, "out.txt")) == "part-rename", "renamed file contents");
+            Need(!File.Exists(Path.Combine(destDir, "out.txt" + PhoneShell.PartSuffix)), "part file left behind");
+        }
+
+        static PhoneFileState PhoneState(bool exists, long size, string item)
+        {
+            PhoneFileState state = new PhoneFileState();
+            state.Exists = exists;
+            state.Size = size;
+            state.Item = item;
+            return state;
+        }
+
+        static void TestPhoneNewCopyRules()
+        {
+            PhoneFileState none = PhoneState(false, -1, null);
+            Need(!PhoneShell.LooksLikeNewCopy(none, none, 10), "nothing there was accepted");
+            Need(PhoneShell.LooksLikeNewCopy(none, PhoneState(true, 10, "new"), 10), "new file with the right size was refused");
+            Need(PhoneShell.LooksLikeNewCopy(none, PhoneState(true, -1, "new"), 10), "new file of unknown size was refused");
+            Need(!PhoneShell.LooksLikeNewCopy(none, PhoneState(true, 4, "new"), 10), "new file with the wrong size was accepted");
+
+            PhoneFileState old = PhoneState(true, 7, "old");
+            Need(!PhoneShell.LooksLikeNewCopy(old, PhoneState(true, 7, "old"), 10), "the old file was accepted as the copy");
+            Need(!PhoneShell.LooksLikeNewCopy(old, PhoneState(true, -1, "old"), 10), "the old file of unknown size was accepted");
+            Need(PhoneShell.LooksLikeNewCopy(old, PhoneState(true, 10, "old"), 10), "a resized file was refused");
+            Need(PhoneShell.LooksLikeNewCopy(old, PhoneState(true, 10, "other"), 10), "a replaced file was refused");
+            Need(!PhoneShell.LooksLikeNewCopy(old, PhoneState(true, 9, "other"), 10), "a wrong-size file was accepted");
+            PhoneFileState sameSize = PhoneState(true, 10, "old");
+            Need(!PhoneShell.LooksLikeNewCopy(sameSize, PhoneState(true, 10, "old"), 10), "the same old object was accepted");
+            Need(PhoneShell.LooksLikeNewCopy(sameSize, PhoneState(true, 10, "other"), 10), "a new object of the same size was refused");
+            Need(!PhoneShell.LooksLikeNewCopy(PhoneState(true, 10, null), PhoneState(true, 10, null), 10), "an unidentified same-size file was accepted");
+        }
+
+        static void TestPhoneProbeFile(string root)
+        {
+            string dir = Path.Combine(root, "phone-probe");
+            string src = Path.Combine(dir, "src.txt");
+            string destDir = Path.Combine(dir, "dest");
+            Directory.CreateDirectory(destDir);
+            File.WriteAllText(src, "probe-new-copy");
+            File.WriteAllText(Path.Combine(destDir, "out.txt"), "old");
+            PhoneShell.RunSta(delegate
+            {
+                IShellItem source = PhoneShell.Open(src);
+                IShellItem folder = PhoneShell.Open(destDir);
+                Need(source != null && folder != null, "could not open probe folders");
+                IShellItem part = null;
+                try
+                {
+                    PhoneFileState missing = PhoneShell.ProbeFile(folder, "nothing.txt");
+                    Need(!missing.Exists, "missing file reported");
+                    PhoneFileState before = PhoneShell.ProbeFile(folder, "out.txt");
+                    Need(before.Exists, "existing file not found");
+                    Need(before.Size == 3, "existing size " + before.Size.ToString());
+                    Need(!PhoneShell.LooksLikeNewCopy(before, PhoneShell.ProbeFile(folder, "out.txt"), 14), "untouched old file looked like the copy");
+
+                    PhoneShell.CopyToFolder(source, folder, "out.txt" + PhoneShell.PartSuffix, null, null);
+                    part = PhoneShell.FindChild(folder, "out.txt" + PhoneShell.PartSuffix);
+                    Need(part != null, "part file missing");
+                    PhoneShell.DeleteNamedQuiet(folder, "out.txt");
+                    string made;
+                    PhoneShell.RenameItem(part, "out.txt", out made);
+                    if (made != null)
+                        Need(PhoneShell.NameOf(made) == "out.txt", "rename reported " + PhoneShell.NameOf(made));
+                    Need(!PhoneShell.ProbeFile(folder, "out.txt" + PhoneShell.PartSuffix).Exists, "part file still there");
+                    Need(PhoneShell.LooksLikeNewCopy(before, PhoneShell.ProbeFile(folder, "out.txt"), 14), "renamed copy was not recognized");
+                }
+                finally
+                {
+                    PhoneShell.Release(part);
+                    PhoneShell.Release(source);
+                    PhoneShell.Release(folder);
+                }
+            });
+            Need(File.ReadAllText(Path.Combine(destDir, "out.txt")) == "probe-new-copy", "probe copy contents");
+        }
+
+        static void TestPhoneAlive()
+        {
+            Need(!PhoneShell.Alive(null), "null item was treated as alive");
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            PhoneShell.RunSta(delegate
+            {
+                IShellItem item = PhoneShell.Open(windows);
+                Need(item != null, "could not open Windows folder");
+                try
+                {
+                    Need(PhoneShell.Alive(item), "Windows folder was not alive");
+                    IShellItem bound = PhoneShell.Bindable(item);
+                    Need(bound != null, "bindable clone missing");
+                    Need(PhoneShell.IsFolder(bound), "bindable clone was not a folder");
+                    if (!object.ReferenceEquals(bound, item)) PhoneShell.Release(bound);
+                    FolderSpot spot = FolderSpot.ForPhone("windows", windows, 0);
+                    spot.Live = item;
+                    FolderSpot dropped = FolderSpot.ForPhone("gone", windows, 0);
+                    dropped.Live = item;
+                    PhoneShell.ForgetFolder(dropped);
+                    Need(dropped.Live == null, "ForgetFolder left the live item");
+                    Need(spot.Live != null, "a live folder was dropped");
+                }
+                finally
+                {
+                    PhoneShell.Release(item);
+                }
+            });
+        }
+
+        static int RunPhoneProbe()
+        {
+            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "phone-probe.log");
+            var log = new StringBuilder();
+            log.AppendLine("Folder Difference Copy phone probe");
+            try
+            {
+                Type type = Type.GetTypeFromProgID("Shell.Application");
+                Need(type != null, "Shell.Application missing");
+                object shell = Activator.CreateInstance(type);
+                object thisPc = type.InvokeMember("NameSpace", BindingFlags.InvokeMethod, null, shell, new object[] { 0x11 });
+                Need(thisPc != null, "This PC missing");
+                object items = thisPc.GetType().InvokeMember("Items", BindingFlags.GetProperty, null, thisPc, null);
+                int count = Convert.ToInt32(items.GetType().InvokeMember("Count", BindingFlags.GetProperty, null, items, null));
+                log.AppendLine("This PC items: " + count.ToString());
+                int phones = 0;
+                for (int i = 0; i < count; i++)
+                {
+                    object fi = items.GetType().InvokeMember("Item", BindingFlags.InvokeMethod, null, items, new object[] { i });
+                    if (fi == null) continue;
+                    string name = fi.GetType().InvokeMember("Name", BindingFlags.GetProperty, null, fi, null) as string;
+                    string itemPath = fi.GetType().InvokeMember("Path", BindingFlags.GetProperty, null, fi, null) as string;
+                    bool isFolder = false;
+                    try { isFolder = Convert.ToBoolean(fi.GetType().InvokeMember("IsFolder", BindingFlags.GetProperty, null, fi, null)); }
+                    catch { }
+                    bool disk = PhoneShell.UseAsDiskFolder(itemPath);
+                    if (disk) continue;
+                    phones++;
+                    log.AppendLine("PHONE " + name);
+                    log.AppendLine("  path: " + itemPath);
+                    log.AppendLine("  folder: " + isFolder.ToString());
+                    if (string.IsNullOrEmpty(itemPath)) continue;
+                    object ns = type.InvokeMember("NameSpace", BindingFlags.InvokeMethod, null, shell, new object[] { itemPath });
+                    if (ns == null)
+                    {
+                        log.AppendLine("  children: could not open");
+                        continue;
+                    }
+                    object kids = ns.GetType().InvokeMember("Items", BindingFlags.GetProperty, null, ns, null);
+                    int kidCount = Convert.ToInt32(kids.GetType().InvokeMember("Count", BindingFlags.GetProperty, null, kids, null));
+                    log.AppendLine("  children: " + kidCount.ToString());
+                    int show = kidCount > 12 ? 12 : kidCount;
+                    for (int k = 0; k < show; k++)
+                    {
+                        object kid = kids.GetType().InvokeMember("Item", BindingFlags.InvokeMethod, null, kids, new object[] { k });
+                        if (kid == null) continue;
+                        string kidName = kid.GetType().InvokeMember("Name", BindingFlags.GetProperty, null, kid, null) as string;
+                        log.AppendLine("    " + kidName);
+                    }
+                }
+                if (phones == 0) log.AppendLine("No phone or portable device under This PC.");
+                log.AppendLine("DONE");
+            }
+            catch (Exception ex)
+            {
+                log.AppendLine("ERROR " + ex.GetType().Name + ": " + ex.Message);
+            }
+            File.WriteAllText(path, log.ToString());
+            return 0;
+        }
+
+        static void TestPhoneOneAtATime()
+        {
+            CopySession session = new CopySession();
+            var jobs = new List<FileJob>();
+            FileJob phone = Named("phone.jpg");
+            phone.PhoneSource = "phone";
+            jobs.Add(phone);
+            session.SetJobs(jobs);
+            Need(session.OneAtATime, "a phone job should force one file at a time");
+            jobs.Clear();
+            jobs.Add(Named("pc.jpg"));
+            session.SetJobs(jobs);
+            Need(!session.OneAtATime, "a PC copy should not be limited");
         }
 
         static void TestPreviewReadOnly(string root)

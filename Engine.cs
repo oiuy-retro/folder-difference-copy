@@ -129,6 +129,16 @@ namespace FolderDiffCopy
         public string Error;
         public int Way;
         internal int Slot = -1;
+        internal string PhoneSource;
+        internal long PhoneTime;
+        internal PhoneTree PhoneDest;
+        internal PhoneTree PhoneFrom;
+        internal IShellItem PhoneLive;
+
+        public bool OnPhone
+        {
+            get { return PhoneSource != null || PhoneDest != null; }
+        }
 
         public string DisplayPath
         {
@@ -418,13 +428,13 @@ namespace FolderDiffCopy
             return false;
         }
 
-        static string Join(string root, string rel)
+        internal static string Join(string root, string rel)
         {
             if (root.EndsWith("\\")) return root + rel;
             return root + "\\" + rel;
         }
 
-        static void ScanTree(string root, HashSet<string> dirs, bool countAsA, ScanStatus status, Action<string, FileMeta> onFile)
+        internal static void ScanTree(string root, HashSet<string> dirs, bool countAsA, ScanStatus status, Action<string, FileMeta> onFile)
         {
             var stack = new Stack<string>();
             stack.Push("");
@@ -506,7 +516,7 @@ namespace FolderDiffCopy
         Cancelled
     }
 
-    internal sealed class CopySession
+    internal sealed partial class CopySession
     {
         readonly object gate = new object();
         readonly ConcurrentQueue<int> doneTicks = new ConcurrentQueue<int>();
@@ -552,6 +562,7 @@ namespace FolderDiffCopy
             var queue = new List<FileJob>();
             var broken = new List<FileJob>();
             int total = 0;
+            bool phone = false;
             if (jobs != null)
             {
                 for (int i = 0; i < jobs.Count; i++)
@@ -568,6 +579,7 @@ namespace FolderDiffCopy
                         queue.Add(job);
                         bytes += job.Size;
                     }
+                    if (job.OnPhone) phone = true;
                 }
             }
             lock (gate)
@@ -580,6 +592,7 @@ namespace FolderDiffCopy
                 BuildIndex();
                 waitStart = 0;
                 totalJobs = total;
+                OneAtATime = phone;
                 completedFiles = 0;
                 peak = 0;
                 running = 0;
@@ -592,6 +605,7 @@ namespace FolderDiffCopy
         {
             if (parallelism < 1) parallelism = 1;
             if (parallelism > 32) parallelism = 32;
+            if (OneAtATime) parallelism = 1;
             lock (gate)
             {
                 desired = parallelism;
@@ -609,6 +623,7 @@ namespace FolderDiffCopy
         {
             if (parallelism < 1) parallelism = 1;
             if (parallelism > 32) parallelism = 32;
+            if (OneAtATime) parallelism = 1;
             bool pump = false;
             lock (gate)
             {
@@ -790,7 +805,7 @@ namespace FolderDiffCopy
                 }
             }
             for (int i = 0; i < start.Count; i++)
-                ThreadPool.QueueUserWorkItem(CopyCallback, start[i]);
+                Launch(start[i]);
         }
 
         void CopyCallback(object state)
@@ -847,6 +862,7 @@ namespace FolderDiffCopy
 
         CopyOutcome CopyOne(FileJob job)
         {
+            if (job.OnPhone) return CopyPhone(job);
             if (cancel) return CopyOutcome.Cancelled;
             string temp = Diff.TempPathFor(job.DestPath);
             bool committed = false;

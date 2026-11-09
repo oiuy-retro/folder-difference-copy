@@ -67,6 +67,9 @@ namespace FolderDiffCopy
         bool suppressFolderEvent;
         string previewedA;
         string previewedB;
+        FolderSpot phoneA;
+        FolderSpot phoneB;
+        readonly Config config = Config.ForApp();
 
         struct SpeedSample
         {
@@ -91,6 +94,13 @@ namespace FolderDiffCopy
             SetStatus(persistentStatus, false);
             timer.Interval = 100;
             timer.Tick += OnTick;
+            PhoneShell.Ui = System.Threading.SynchronizationContext.Current;
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            PhoneShell.Ui = System.Threading.SynchronizationContext.Current;
         }
 
         void Build()
@@ -288,6 +298,8 @@ namespace FolderDiffCopy
                 SetStatus("Stopping...", false);
                 return;
             }
+            PhoneShell.Revoke(phoneA);
+            PhoneShell.Revoke(phoneB);
             base.OnFormClosing(e);
         }
 
@@ -385,10 +397,71 @@ namespace FolderDiffCopy
 
         void Browse(TextBox box, string title)
         {
-            string current = Paths.Normalize(box.Text);
-            string picked = FolderDialog.Pick(this, title, current);
-            if (!string.IsNullOrEmpty(picked))
-                box.Text = picked;
+            FolderSpot phone = PhoneFor(box);
+            string key = box == folderA ? "a" : "b";
+            string current = phone != null ? null : Paths.Normalize(box.Text);
+            string startPhone = phone == null ? null : phone.PhoneItem;
+            if (phone == null && !Paths.Exists(current))
+            {
+                // Nothing usable in the box, so open where this same Browse
+                // button left off last time (or the nearest folder that still
+                // exists, if that one was moved or its drive is unplugged).
+                string saved = config.GetPath("folders", key);
+                if (!string.IsNullOrEmpty(saved) && saved.StartsWith("::", StringComparison.Ordinal))
+                    startPhone = saved;
+                else
+                    current = Config.NearestExisting(saved);
+            }
+            FolderSpot picked = FolderDialog.Pick(this, title, current, startPhone);
+            if (picked == null) return;
+            if (picked.Error != null)
+            {
+                SetStatus(picked.Error, true);
+                MessageBox.Show(this, picked.Error, "Folder Difference Copy", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            if (picked.IsPhone)
+            {
+                KeepPhone(box, picked);
+                box.Text = picked.Text;
+                config.Set("folders", key, picked.PhoneItem);
+            }
+            else if (!string.IsNullOrEmpty(picked.Path))
+            {
+                box.Text = picked.Path;
+                config.Set("folders", key, picked.Path);
+            }
+            ApplyOptionLocks();
+        }
+
+        void KeepPhone(TextBox box, FolderSpot picked)
+        {
+            if (box == folderA)
+            {
+                PhoneShell.Revoke(phoneA);
+                phoneA = picked;
+            }
+            else
+            {
+                PhoneShell.Revoke(phoneB);
+                phoneB = picked;
+            }
+        }
+
+        // The phone folder picked for this box, as long as the box still shows it.
+        FolderSpot PhoneFor(TextBox box)
+        {
+            FolderSpot spot = box == folderA ? phoneA : phoneB;
+            if (spot == null) return null;
+            string shown = box.Text == null ? "" : box.Text.Trim();
+            string kept = spot.Text == null ? "" : spot.Text.Trim();
+            if (!string.Equals(shown, kept, StringComparison.OrdinalIgnoreCase)) return null;
+            return spot;
+        }
+
+        bool PhoneInvolved()
+        {
+            return SelectedDrive().Phone || PhoneFor(folderA) != null || PhoneFor(folderB) != null;
         }
 
         void OnDragEnter(object sender, DragEventArgs e)
@@ -466,6 +539,22 @@ namespace FolderDiffCopy
             smallestFirst.Enabled = open && !folderOrder.Checked && !largeSmall.Checked && !largestFirst.Checked;
             largestFirst.Enabled = open && !folderOrder.Checked && !largeSmall.Checked && !smallestFirst.Checked;
             bothWays.Enabled = phase == PhaseIdle;
+            ApplyPhoneLock();
+        }
+
+        // Phones copy one file at a time. Parallelization is locked at 1 and greyed out
+        // while a phone profile is picked or either folder is on a phone.
+        void ApplyPhoneLock()
+        {
+            bool phone = PhoneInvolved();
+            if (phone && parallel.Value != 1) parallel.Value = 1;
+            if (parallel.Enabled == phone)
+            {
+                parallel.Enabled = !phone;
+                labelParallel.Enabled = !phone;
+                tips.SetToolTip(labelParallel, phone ? "Phones copy one file at a time." : "Files copied at the same time.");
+                tips.SetToolTip(parallel, phone ? "Phones copy one file at a time." : "1 to 32.");
+            }
         }
 
         int SelectedOrder()
@@ -534,9 +623,21 @@ namespace FolderDiffCopy
 
         void OnStart(object sender, EventArgs e)
         {
+            try
+            {
+                OnStartCore();
+            }
+            catch (Exception ex)
+            {
+                ShowPhoneFailure(ex);
+            }
+        }
+
+        void OnStartCore()
+        {
             if (phase != PhaseIdle) return;
-            string a;
-            string b;
+            FolderSpot a;
+            FolderSpot b;
             string error;
             if (!TryReadFolders(out a, out b, out error))
             {
@@ -544,7 +645,7 @@ namespace FolderDiffCopy
                 MessageBox.Show(this, error, "Folder Difference Copy", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-            if (Paths.IsDriveRoot(a) || Paths.IsDriveRoot(b))
+            if ((!a.IsPhone && Paths.IsDriveRoot(a.Path)) || (!b.IsPhone && Paths.IsDriveRoot(b.Path)))
             {
                 DialogResult answer = MessageBox.Show(
                     this,
@@ -556,9 +657,9 @@ namespace FolderDiffCopy
                 if (answer != DialogResult.Yes) return;
             }
 
-            if (!Paths.Exists(b))
+            if (!b.IsPhone && !Paths.Exists(b.Path))
             {
-                try { Native.EnsureDirectory(Native.ToExtended(b)); }
+                try { Native.EnsureDirectory(Native.ToExtended(b.Path)); }
                 catch (Exception ex)
                 {
                     SetStatus(ex.Message, true);
@@ -600,9 +701,21 @@ namespace FolderDiffCopy
 
         void OnPreview(object sender, EventArgs e)
         {
+            try
+            {
+                OnPreviewCore();
+            }
+            catch (Exception ex)
+            {
+                ShowPhoneFailure(ex);
+            }
+        }
+
+        void OnPreviewCore()
+        {
             if (phase != PhaseIdle) return;
-            string a;
-            string b;
+            FolderSpot a;
+            FolderSpot b;
             string error;
             if (!TryReadFolders(out a, out b, out error))
             {
@@ -613,9 +726,18 @@ namespace FolderDiffCopy
             BeginScan(true);
         }
 
+        void ShowPhoneFailure(Exception error)
+        {
+            string text = PhoneErrors.Describe(error);
+            if (string.IsNullOrEmpty(text)) text = error.GetType().Name;
+            SetStatus(text, true);
+            MessageBox.Show(this, text, "Folder Difference Copy", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
         void OnFolderTextChanged(object sender, EventArgs e)
         {
             UpdatePreviewButton();
+            ApplyPhoneLock();
             if (suppressFolderEvent || phase != PhaseIdle) return;
             if (previewedA == null) return;
             if (folderA.Text == previewedA && folderB.Text == previewedB) return;
@@ -648,8 +770,9 @@ namespace FolderDiffCopy
 
         void BeginScan(bool preview)
         {
-            string a;
-            string b;
+            PhoneShell.Ui = System.Threading.SynchronizationContext.Current;
+            FolderSpot a;
+            FolderSpot b;
             string error;
             if (!TryReadFolders(out a, out b, out error))
             {
@@ -685,15 +808,40 @@ namespace FolderDiffCopy
             timer.Start();
 
             scan = new ScanStatus();
-            string folderFrom = a;
-            string folderTo = b;
+            FolderSpot folderFrom = a;
+            FolderSpot folderTo = b;
             bool writeFolders = !preview;
             bool copyBothWays = bothWays.Checked;
+            ScanStatus scanning = scan;
+            // Phone shell items belong to this window's thread. Running the compare
+            // from a worker and hopping back blocks Explorer calls, so the phone
+            // folder looks closed even though Browse just opened it.
+            if (folderFrom.IsPhone || folderTo.IsPhone)
+            {
+                CompareResult phoneResult = null;
+                Exception phoneFailed = null;
+                try
+                {
+                    phoneResult = PhoneDiff.Compare(folderFrom, folderTo, scanning, writeFolders, copyBothWays);
+                }
+                catch (Exception ex)
+                {
+                    phoneFailed = ex;
+                }
+                OnCompareDone(phoneResult, phoneFailed);
+                return;
+            }
             System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
                 CompareResult result = null;
                 Exception failed = null;
-                try { result = Diff.Compare(folderFrom, folderTo, scan, writeFolders, copyBothWays); }
+                try
+                {
+                    if (folderFrom.IsPhone || folderTo.IsPhone)
+                        result = PhoneDiff.Compare(folderFrom, folderTo, scanning, writeFolders, copyBothWays);
+                    else
+                        result = Diff.Compare(folderFrom.Path, folderTo.Path, scanning, writeFolders, copyBothWays);
+                }
                 catch (Exception ex) { failed = ex; }
                 try
                 {
@@ -706,35 +854,42 @@ namespace FolderDiffCopy
             });
         }
 
-        bool TryReadFolders(out string a, out string b, out string error)
+        bool TryReadFolders(out FolderSpot a, out FolderSpot b, out string error)
         {
-            bool validA = Paths.TryNormalize(folderA.Text, out a);
-            bool validB = Paths.TryNormalize(folderB.Text, out b);
-            suppressFolderEvent = true;
-            folderA.Text = a;
-            folderB.Text = b;
-            suppressFolderEvent = false;
-            if (a.Length == 0 || b.Length == 0)
+            a = ReadFolder(folderA);
+            b = ReadFolder(folderB);
+            if (a.Text.Length == 0 || b.Text.Length == 0)
             {
                 error = "Choose Folder A and Folder B.";
                 return false;
             }
-            if (!validA)
+            if (a.IsPhone && b.IsPhone)
+            {
+                error = "Only one folder can be on a phone. Pick a folder on this PC for the other side.";
+                return false;
+            }
+            string normalized;
+            if (!a.IsPhone && !Paths.TryNormalize(a.Text, out normalized))
             {
                 error = "Folder A is not a valid folder path.";
                 return false;
             }
-            if (!validB)
+            if (!b.IsPhone && !Paths.TryNormalize(b.Text, out normalized))
             {
                 error = "Folder B is not a valid folder path.";
                 return false;
             }
-            if (!Paths.Exists(a))
+            if (a.IsPhone || b.IsPhone)
+            {
+                error = null;
+                return true;
+            }
+            if (!Paths.Exists(a.Path))
             {
                 error = "Folder A does not exist.";
                 return false;
             }
-            if (Paths.Overlap(a, b))
+            if (Paths.Overlap(a.Path, b.Path))
             {
                 error = "Pick two folders that do not contain each other.";
                 return false;
@@ -743,11 +898,62 @@ namespace FolderDiffCopy
             return true;
         }
 
+        // Reads a folder box. A picked phone folder stays as it is; typed text that names a
+        // phone folder (for example "This PC\Phone\Internal shared storage\Music") is
+        // looked up; anything else is a normal path.
+        FolderSpot ReadFolder(TextBox box)
+        {
+            FolderSpot phone = PhoneFor(box);
+            if (phone != null) return phone;
+            string text = box.Text.Trim().Trim('"').Trim();
+            if (text.Length > 0 && LooksLikePhoneText(text))
+            {
+                FolderSpot typed = FolderDialog.ResolvePhone(text);
+                if (typed != null)
+                {
+                    typed.Text = text;
+                    KeepPhone(box, typed);
+                    ApplyPhoneLock();
+                    return typed;
+                }
+            }
+            string path = Paths.Normalize(box.Text);
+            suppressFolderEvent = true;
+            box.Text = path;
+            suppressFolderEvent = false;
+            return FolderSpot.ForPath(path);
+        }
+
+        static bool LooksLikePath(string text)
+        {
+            if (text.StartsWith("::")) return false;
+            try
+            {
+                return System.IO.Path.IsPathRooted(text);
+            }
+            catch (ArgumentException)
+            {
+                return true;
+            }
+        }
+
+        static bool LooksLikePhoneText(string text)
+        {
+            if (text.StartsWith("::")) return true;
+            if (text.IndexOf("This PC", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            return !LooksLikePath(text);
+        }
+
         void OnCompareDone(CompareResult result, Exception error)
         {
             if (IsDisposed) return;
             if (error != null)
             {
+                if (PhoneErrors.Describe(error) == PhoneErrors.Unplugged)
+                {
+                    PhoneShell.ForgetFolder(phoneA);
+                    PhoneShell.ForgetFolder(phoneB);
+                }
                 previewOnly = false;
                 previewedA = null;
                 previewedB = null;
@@ -756,8 +962,11 @@ namespace FolderDiffCopy
                 timer.Stop();
                 progress.Marquee = false;
                 list.EmptyText = "Files that still need to be copied will show up here.";
-                SetStatus(error.Message, true);
+                string text = PhoneErrors.Describe(error);
+                if (string.IsNullOrEmpty(text)) text = error.GetType().Name;
+                SetStatus(text, true);
                 Text = "Folder Difference Copy";
+                MessageBox.Show(this, text, "Folder Difference Copy", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 if (closeAfterStop) Close();
                 return;
             }
@@ -789,6 +998,7 @@ namespace FolderDiffCopy
                 return;
             }
             session = new CopySession();
+            ApplyPhoneLock();
             CopyPlan.Arrange(result.Jobs, SelectedOrder(), (int)parallel.Value);
             session.SetJobs(result.Jobs);
             list.EmptyText = "Nothing left to copy.";
@@ -1104,7 +1314,9 @@ namespace FolderDiffCopy
             metrics.SetValue(3, "-");
             detailLabel.Text = Readout.FormatBytes(bytes);
             string message = count == 0
-                ? "Nothing to copy."
+                ? ((PhoneFor(folderA) != null || PhoneFor(folderB) != null)
+                    ? "Reached the phone folder. Nothing to copy."
+                    : "Nothing to copy.")
                 : string.Format("{0:N0} files, {1}.", count, Readout.FormatBytes(bytes));
             if (broken > 0)
                 message += string.Format(" {0:N0} cannot be copied.", broken);
@@ -1218,17 +1430,26 @@ namespace FolderDiffCopy
             public string Name;
             public int FilesAtOnce;
             public int Order;
+            public bool Phone;
 
             public DriveChoice(string name, int filesAtOnce, int order)
+                : this(name, filesAtOnce, order, false)
+            {
+            }
+
+            public DriveChoice(string name, int filesAtOnce, int order, bool phone)
             {
                 Name = name;
                 FilesAtOnce = filesAtOnce;
                 Order = order;
+                Phone = phone;
             }
         }
 
         // Hard drives lose speed when the head jumps between files, so those stay in folder order.
         // Two solid-state drives can keep a large file moving while small files copy beside it.
+        // Phones take one file at a time over USB, so phone profiles copy one file at a time in
+        // folder order. That keeps a hard drive reading in order and keeps each phone folder together.
         static readonly DriveChoice[] DriveChoices = new DriveChoice[] {
             new DriveChoice("Default", 1, CopyPlan.PathOrder),
             new DriveChoice("Hard drive to hard drive", 2, CopyPlan.PathOrder),
@@ -1236,7 +1457,11 @@ namespace FolderDiffCopy
             new DriveChoice("Solid-state drive to hard drive", 2, CopyPlan.PathOrder),
             new DriveChoice("Solid-state drive to solid-state drive", 8, CopyPlan.LargeWithSmall),
             new DriveChoice("Same hard drive", 1, CopyPlan.PathOrder),
-            new DriveChoice("Same solid-state drive", 4, CopyPlan.LargeWithSmall)
+            new DriveChoice("Same solid-state drive", 4, CopyPlan.LargeWithSmall),
+            new DriveChoice("Hard drive to phone", 1, CopyPlan.PathOrder, true),
+            new DriveChoice("Solid-state drive to phone", 1, CopyPlan.PathOrder, true),
+            new DriveChoice("Phone to hard drive", 1, CopyPlan.PathOrder, true),
+            new DriveChoice("Phone to solid-state drive", 1, CopyPlan.PathOrder, true)
         };
 
         protected override void Dispose(bool disposing)

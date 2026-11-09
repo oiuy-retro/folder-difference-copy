@@ -6,3 +6,4 @@ dist/*.log
 .vscode/
 dist/
 *.exe
+configuration.conf
