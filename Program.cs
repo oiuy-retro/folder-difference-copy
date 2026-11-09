@@ -86,6 +86,8 @@ namespace FolderDiffCopy
                 failed += Check(log, "phone shell item can be kept", delegate { TestPhoneGitCookie(); });
                 failed += Check(log, "phone relative child", delegate { TestPhoneRelativeChild(); });
                 failed += Check(log, "phone copy to a disk folder", delegate { TestPhoneCopyToFolder(root); });
+                failed += Check(log, "config file keeps hand edits", delegate { TestConfigEdits(); });
+                failed += Check(log, "config remembers folders", delegate { TestConfigFolders(root); });
                 failed += Check(log, "phone part file is renamed", delegate { TestPhonePartRename(root); });
                 failed += Check(log, "phone real name is only kept when it is the new copy", delegate { TestPhoneNewCopyRules(); });
                 failed += Check(log, "phone folder file probe", delegate { TestPhoneProbeFile(root); });
@@ -642,6 +644,40 @@ namespace FolderDiffCopy
                     PhoneShell.Release(parent);
                 }
             });
+        }
+
+        static void TestConfigEdits()
+        {
+            string text = "# my note\r\n[tools]\r\nffmpeg = auto\r\n\r\n[folders]\r\n# keep me\r\na = C:\\Old\r\n\r\n[other]\r\nx = 1\r\n";
+            string updated = Config.UpdateText(text, "folders", "A", "D:\\New");
+            string expected = "# my note\r\n[tools]\r\nffmpeg = auto\r\n\r\n[folders]\r\n# keep me\r\nA = D:\\New\r\n\r\n[other]\r\nx = 1\r\n";
+            if (updated != expected) throw new Exception("replace changed other lines:\n" + updated);
+            updated = Config.UpdateText(text, "folders", "b", "E:\\B");
+            if (!updated.Contains("a = C:\\Old\r\nb = E:\\B\r\n\r\n[other]")) throw new Exception("add went to the wrong place:\n" + updated);
+            updated = Config.UpdateText("[tools]\n", "folders", "a", "C:\\X");
+            if (updated != "[tools]\n\n[folders]\na = C:\\X\n") throw new Exception("new section wrong:\n" + updated);
+        }
+
+        static void TestConfigFolders(string root)
+        {
+            string dir = Path.Combine(root, "conf");
+            Directory.CreateDirectory(dir);
+            string main = Path.Combine(dir, Config.FileName);
+            string fallback = Path.Combine(Path.Combine(dir, "appdata"), Config.FileName);
+            var config = new Config(main, fallback);
+            config.Load();
+            if (!File.Exists(main)) throw new Exception("template not written");
+            if (!string.IsNullOrEmpty(config.GetPath("folders", "a"))) throw new Exception("template a not empty");
+            string picked = Path.Combine(dir, "picked");
+            Directory.CreateDirectory(picked);
+            config.Set("folders", "a", picked);
+            var again = new Config(main, fallback);
+            again.Load();
+            if (!string.Equals(again.GetPath("folders", "a"), picked, StringComparison.OrdinalIgnoreCase)) throw new Exception("a not remembered");
+            if (Config.NearestExisting(Path.Combine(picked, "gone\\deeper")) != picked) throw new Exception("nearest parent wrong");
+            File.WriteAllText(main, "[folders]\r\nb = sub\r\n");
+            again.Load();
+            if (!string.Equals(again.GetPath("folders", "b"), Path.Combine(dir, "sub"), StringComparison.OrdinalIgnoreCase)) throw new Exception("relative path not from config folder");
         }
 
         static void TestPhoneCopyToFolder(string root)

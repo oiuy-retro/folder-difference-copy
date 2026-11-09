@@ -68,6 +68,7 @@ namespace FolderDiffCopy
         string previewedB;
         FolderSpot phoneA;
         FolderSpot phoneB;
+        readonly Config config = Config.ForApp();
 
         struct SpeedSample
         {
@@ -396,8 +397,21 @@ namespace FolderDiffCopy
         void Browse(TextBox box, string title)
         {
             FolderSpot phone = PhoneFor(box);
+            string key = box == folderA ? "a" : "b";
             string current = phone != null ? null : Paths.Normalize(box.Text);
-            FolderSpot picked = FolderDialog.Pick(this, title, current, phone == null ? null : phone.PhoneItem);
+            string startPhone = phone == null ? null : phone.PhoneItem;
+            if (phone == null && !Paths.Exists(current))
+            {
+                // Nothing usable in the box, so open where this same Browse
+                // button left off last time (or the nearest folder that still
+                // exists, if that one was moved or its drive is unplugged).
+                string saved = config.GetPath("folders", key);
+                if (!string.IsNullOrEmpty(saved) && saved.StartsWith("::", StringComparison.Ordinal))
+                    startPhone = saved;
+                else
+                    current = Config.NearestExisting(saved);
+            }
+            FolderSpot picked = FolderDialog.Pick(this, title, current, startPhone);
             if (picked == null) return;
             if (picked.Error != null)
             {
@@ -409,10 +423,12 @@ namespace FolderDiffCopy
             {
                 KeepPhone(box, picked);
                 box.Text = picked.Text;
+                config.Set("folders", key, picked.PhoneItem);
             }
             else if (!string.IsNullOrEmpty(picked.Path))
             {
                 box.Text = picked.Path;
+                config.Set("folders", key, picked.Path);
             }
             ApplyOptionLocks();
         }
