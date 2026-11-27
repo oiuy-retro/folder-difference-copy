@@ -22,6 +22,7 @@ namespace FolderDiffCopy
         readonly CheckBox smallestFirst = new CheckBox();
         readonly CheckBox largestFirst = new CheckBox();
         readonly CheckBox bothWays = new CheckBox();
+        readonly CheckBox daylightSaving = new CheckBox();
         bool applyingOptions;
         readonly Label filesLabel = new Label();
         readonly Label percentLabel = new Label();
@@ -135,6 +136,13 @@ namespace FolderDiffCopy
             bothWays.Text = "Copy both &ways";
             bothWays.AutoSize = true;
             bothWays.CheckedChanged += OnBothWaysChanged;
+            daylightSaving.Text = "Daylight Savings error fix";
+            daylightSaving.AutoSize = true;
+            string rawFix = config.Get(Config.AppSection, Config.DaylightSavingKey);
+            daylightSaving.Checked = !string.Equals(rawFix, "false", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(rawFix, "0", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(rawFix, "no", StringComparison.OrdinalIgnoreCase);
+            daylightSaving.CheckedChanged += OnDaylightSavingChanged;
             filesLabel.Text = "Files remaining";
             filesLabel.AutoSize = true;
             filesLabel.ForeColor = Win7.Text;
@@ -189,6 +197,7 @@ namespace FolderDiffCopy
             tips.SetToolTip(smallestFirst, "Copy smallest files first.");
             tips.SetToolTip(largestFirst, "Copy largest files first.");
             tips.SetToolTip(bothWays, "Each folder gets the other's files.");
+            tips.SetToolTip(daylightSaving, "Treat same-size files exactly one hour apart as unchanged (camera clock / daylight saving changes)");
 
             startAt.Text = "Start at";
             startAt.AutoSize = true;
@@ -229,7 +238,7 @@ namespace FolderDiffCopy
 
             Control[] controls = new Control[] {
                 labelA, folderA, browseA, labelB, folderB, browseB,
-                labelParallel, parallel, labelProfile, profileCombo, bothWays, folderOrder, largeSmall, smallestFirst, largestFirst, previewButton, startButton, stopButton,
+                labelParallel, parallel, labelProfile, profileCombo, bothWays, daylightSaving, folderOrder, largeSmall, smallestFirst, largestFirst, previewButton, startButton, stopButton,
                 startAt, startWhen,
                 progress, percentLabel, detailLabel, metrics, filesLabel, list, status
             };
@@ -248,6 +257,7 @@ namespace FolderDiffCopy
             labelProfile.TabIndex = tab++;
             profileCombo.TabIndex = tab++;
             bothWays.TabIndex = tab++;
+            daylightSaving.TabIndex = tab++;
             folderOrder.TabIndex = tab++;
             largeSmall.TabIndex = tab++;
             smallestFirst.TabIndex = tab++;
@@ -364,6 +374,7 @@ namespace FolderDiffCopy
             int optionX = pad;
             int optionY = y;
             PlaceOption(bothWays, ref optionX, ref optionY, pad, width, editH);
+            PlaceOption(daylightSaving, ref optionX, ref optionY, pad, width, editH);
             PlaceOption(folderOrder, ref optionX, ref optionY, pad, width, editH);
             PlaceOption(largeSmall, ref optionX, ref optionY, pad, width, editH);
             PlaceOption(smallestFirst, ref optionX, ref optionY, pad, width, editH);
@@ -539,6 +550,7 @@ namespace FolderDiffCopy
             smallestFirst.Enabled = open && !folderOrder.Checked && !largeSmall.Checked && !largestFirst.Checked;
             largestFirst.Enabled = open && !folderOrder.Checked && !largeSmall.Checked && !smallestFirst.Checked;
             bothWays.Enabled = phase == PhaseIdle;
+            daylightSaving.Enabled = phase == PhaseIdle;
             ApplyPhoneLock();
         }
 
@@ -580,6 +592,13 @@ namespace FolderDiffCopy
         void OnBothWaysChanged(object sender, EventArgs e)
         {
             UpdateWayTips();
+            if (phase != PhaseIdle) return;
+            if (previewedA != null) ClearPreview();
+        }
+
+        void OnDaylightSavingChanged(object sender, EventArgs e)
+        {
+            config.Set(Config.AppSection, Config.DaylightSavingKey, daylightSaving.Checked ? "true" : "false");
             if (phase != PhaseIdle) return;
             if (previewedA != null) ClearPreview();
         }
@@ -812,6 +831,7 @@ namespace FolderDiffCopy
             FolderSpot folderTo = b;
             bool writeFolders = !preview;
             bool copyBothWays = bothWays.Checked;
+            bool useDaylightSavingFix = daylightSaving.Checked;
             ScanStatus scanning = scan;
             // Phone shell items belong to this window's thread. Running the compare
             // from a worker and hopping back blocks Explorer calls, so the phone
@@ -840,7 +860,7 @@ namespace FolderDiffCopy
                     if (folderFrom.IsPhone || folderTo.IsPhone)
                         result = PhoneDiff.Compare(folderFrom, folderTo, scanning, writeFolders, copyBothWays);
                     else
-                        result = Diff.Compare(folderFrom.Path, folderTo.Path, scanning, writeFolders, copyBothWays);
+                        result = Diff.Compare(folderFrom.Path, folderTo.Path, scanning, writeFolders, copyBothWays, useDaylightSavingFix);
                 }
                 catch (Exception ex) { failed = ex; }
                 try

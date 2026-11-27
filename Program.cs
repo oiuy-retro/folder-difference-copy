@@ -61,6 +61,8 @@ namespace FolderDiffCopy
                 failed += Check(log, "compare and copy", delegate { TestCompareAndCopy(root); });
                 failed += Check(log, "changed file is replaced", delegate { TestChanged(root); });
                 failed += Check(log, "time tolerance", delegate { TestTimeTolerance(root); });
+                failed += Check(log, "one hour clock", delegate { TestHourClock(root); });
+                failed += Check(log, "hour clock toggle off", delegate { TestHourClockOff(root); });
                 failed += Check(log, "readonly destination", delegate { TestReadOnly(root); });
                 failed += Check(log, "empty folders and extra files", delegate { TestExtras(root); });
                 failed += Check(log, "progress stays accurate", delegate { TestProgress(root); });
@@ -95,6 +97,7 @@ namespace FolderDiffCopy
                 failed += Check(log, "phone copy to a disk folder", delegate { TestPhoneCopyToFolder(root); });
                 failed += Check(log, "config file keeps hand edits", delegate { TestConfigEdits(); });
                 failed += Check(log, "config remembers folders", delegate { TestConfigFolders(root); });
+                failed += Check(log, "config daylight saving fix", delegate { TestConfigDaylightSaving(root); });
                 failed += Check(log, "phone part file is renamed", delegate { TestPhonePartRename(root); });
                 failed += Check(log, "phone real name is only kept when it is the new copy", delegate { TestPhoneNewCopyRules(); });
                 failed += Check(log, "phone folder file probe", delegate { TestPhoneProbeFile(root); });
@@ -203,6 +206,66 @@ namespace FolderDiffCopy
             CompareResult result = Diff.Compare(a, b, new ScanStatus());
             Need(result.Jobs.Count == 1, "tolerance jobs " + result.Jobs.Count);
             Need(result.Jobs[0].RelativePath == "far.txt", result.Jobs[0].RelativePath);
+        }
+
+        static void TestHourClock(string root)
+        {
+            string a = Path.Combine(root, "hour-a");
+            string b = Path.Combine(root, "hour-b");
+            Write(Path.Combine(a, "hour.txt"), "same");
+            Write(Path.Combine(b, "hour.txt"), "same");
+            Write(Path.Combine(a, "later.txt"), "same");
+            Write(Path.Combine(b, "later.txt"), "same");
+            Write(Path.Combine(a, "near.txt"), "same");
+            Write(Path.Combine(b, "near.txt"), "same");
+            Write(Path.Combine(a, "early.txt"), "same");
+            Write(Path.Combine(b, "early.txt"), "same");
+            Write(Path.Combine(a, "far.txt"), "same");
+            Write(Path.Combine(b, "far.txt"), "same");
+            Write(Path.Combine(a, "sized.txt"), "longer");
+            Write(Path.Combine(b, "sized.txt"), "x");
+            DateTime t = new DateTime(2025, 12, 24, 15, 4, 59, DateTimeKind.Utc);
+            File.SetLastWriteTimeUtc(Path.Combine(a, "hour.txt"), t);
+            File.SetLastWriteTimeUtc(Path.Combine(b, "hour.txt"), t.AddHours(-1));
+            File.SetLastWriteTimeUtc(Path.Combine(a, "later.txt"), t);
+            File.SetLastWriteTimeUtc(Path.Combine(b, "later.txt"), t.AddHours(1));
+            File.SetLastWriteTimeUtc(Path.Combine(a, "near.txt"), t);
+            File.SetLastWriteTimeUtc(Path.Combine(b, "near.txt"), t.AddHours(-1).AddSeconds(-2));
+            File.SetLastWriteTimeUtc(Path.Combine(a, "early.txt"), t);
+            File.SetLastWriteTimeUtc(Path.Combine(b, "early.txt"), t.AddHours(-1).AddSeconds(2));
+            File.SetLastWriteTimeUtc(Path.Combine(a, "far.txt"), t);
+            File.SetLastWriteTimeUtc(Path.Combine(b, "far.txt"), t.AddHours(-1).AddSeconds(-3));
+            File.SetLastWriteTimeUtc(Path.Combine(a, "sized.txt"), t);
+            File.SetLastWriteTimeUtc(Path.Combine(b, "sized.txt"), t.AddHours(-1));
+            CompareResult result = Diff.Compare(a, b, new ScanStatus());
+            Need(result.Unchanged == 4, "hour unchanged " + result.Unchanged);
+            Need(result.Jobs.Count == 2, "hour jobs " + result.Jobs.Count);
+            Need(result.Jobs[0].RelativePath == "far.txt", result.Jobs[0].RelativePath);
+            Need(result.Jobs[1].RelativePath == "sized.txt", result.Jobs[1].RelativePath);
+            CompareResult both = Diff.Compare(a, b, new ScanStatus(), true, true);
+            Need(both.Unchanged == 4, "both ways unchanged " + both.Unchanged);
+            Need(both.Jobs.Count == 2, "both ways jobs " + both.Jobs.Count);
+            Need(both.Jobs[0].RelativePath == "far.txt", both.Jobs[0].RelativePath);
+            Need(both.Jobs[1].RelativePath == "sized.txt", both.Jobs[1].RelativePath);
+        }
+
+        static void TestHourClockOff(string root)
+        {
+            string a = Path.Combine(root, "hour-off-a");
+            string b = Path.Combine(root, "hour-off-b");
+            Write(Path.Combine(a, "hour.txt"), "same");
+            Write(Path.Combine(b, "hour.txt"), "same");
+            DateTime t = new DateTime(2025, 12, 24, 15, 4, 59, DateTimeKind.Utc);
+            File.SetLastWriteTimeUtc(Path.Combine(a, "hour.txt"), t);
+            File.SetLastWriteTimeUtc(Path.Combine(b, "hour.txt"), t.AddHours(-1));
+            CompareResult result = Diff.Compare(a, b, new ScanStatus(), true, false, false);
+            Need(result.Jobs.Count == 1, "off jobs " + result.Jobs.Count);
+            Need(result.Jobs[0].RelativePath == "hour.txt", result.Jobs[0].RelativePath);
+            Need(result.Unchanged == 0, "off unchanged " + result.Unchanged);
+            CompareResult both = Diff.Compare(a, b, new ScanStatus(), true, true, false);
+            Need(both.Jobs.Count == 1, "off both ways jobs " + both.Jobs.Count);
+            Need(both.Jobs[0].RelativePath == "hour.txt", both.Jobs[0].RelativePath);
+            Need(both.Unchanged == 0, "off both ways unchanged " + both.Unchanged);
         }
 
         static void TestReadOnly(string root)
@@ -685,6 +748,36 @@ namespace FolderDiffCopy
             File.WriteAllText(main, "[folders]\r\nb = sub\r\n");
             again.Load();
             if (!string.Equals(again.GetPath("folders", "b"), Path.Combine(dir, "sub"), StringComparison.OrdinalIgnoreCase)) throw new Exception("relative path not from config folder");
+        }
+
+        static void TestConfigDaylightSaving(string root)
+        {
+            string dir = Path.Combine(root, "conf-dst");
+            Directory.CreateDirectory(dir);
+            string main = Path.Combine(dir, Config.FileName);
+            var config = new Config(main, null);
+            config.Load();
+            if (!File.Exists(main)) throw new Exception("template not written");
+            string raw = config.Get(Config.AppSection, Config.DaylightSavingKey);
+            if (!string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase))
+                throw new Exception("template default " + raw);
+            string withNote = File.ReadAllText(main, Encoding.UTF8) + "# keep this note\r\n";
+            File.WriteAllText(main, withNote, Encoding.UTF8);
+            config.Load();
+            config.Set(Config.AppSection, Config.DaylightSavingKey, "false");
+            string text = File.ReadAllText(main, Encoding.UTF8);
+            if (!text.Contains("# keep this note")) throw new Exception("hand edit lost:\n" + text);
+            var again = new Config(main, null);
+            again.Load();
+            if (!string.Equals(again.Get(Config.AppSection, Config.DaylightSavingKey), "false", StringComparison.OrdinalIgnoreCase))
+                throw new Exception("false not remembered");
+            again.Set(Config.AppSection, Config.DaylightSavingKey, "true");
+            var third = new Config(main, null);
+            third.Load();
+            if (!string.Equals(third.Get(Config.AppSection, Config.DaylightSavingKey), "true", StringComparison.OrdinalIgnoreCase))
+                throw new Exception("true not remembered");
+            text = File.ReadAllText(main, Encoding.UTF8);
+            if (!text.Contains("# keep this note")) throw new Exception("hand edit lost after true:\n" + text);
         }
 
         static void TestPhoneCopyToFolder(string root)

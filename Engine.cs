@@ -183,6 +183,7 @@ namespace FolderDiffCopy
     internal static class Diff
     {
         const long TwoSeconds = 20000000L;
+        const long OneHour = 36000000000L;
 
         public static CompareResult Compare(string folderA, string folderB, ScanStatus status)
         {
@@ -195,6 +196,11 @@ namespace FolderDiffCopy
         }
 
         public static CompareResult Compare(string folderA, string folderB, ScanStatus status, bool writeFolders, bool bothWays)
+        {
+            return Compare(folderA, folderB, status, writeFolders, bothWays, true);
+        }
+
+        public static CompareResult Compare(string folderA, string folderB, ScanStatus status, bool writeFolders, bool bothWays, bool daylightSavingFix)
         {
             if (status == null) status = new ScanStatus();
             folderA = Paths.Normalize(folderA);
@@ -252,7 +258,7 @@ namespace FolderDiffCopy
                 FileMeta meta = pair.Value;
                 FileMeta other;
                 bool exists = filesB.TryGetValue(rel, out other);
-                if (exists && other.Size == meta.Size && !TimesDiffer(meta.WriteTime, other.WriteTime))
+                if (exists && other.Size == meta.Size && !TimesDiffer(meta.WriteTime, other.WriteTime, daylightSavingFix))
                 {
                     result.Unchanged++;
                     continue;
@@ -409,11 +415,17 @@ namespace FolderDiffCopy
             return removed;
         }
 
-        static bool TimesDiffer(long a, long b)
+        static bool TimesDiffer(long a, long b, bool daylightSavingFix)
         {
             long delta = a > b ? a - b : b - a;
             // FAT stores modified times in 2 second steps. Closer than that counts as the same time.
-            return delta > TwoSeconds;
+            if (delta <= TwoSeconds) return false;
+            // With Daylight Savings error fix on, a same-sized file whose times are
+            // within 2 seconds of one hour is still the same file (camera clock or
+            // daylight saving changes).
+            if (!daylightSavingFix) return true;
+            long pastHour = delta > OneHour ? delta - OneHour : OneHour - delta;
+            return pastHour > TwoSeconds;
         }
 
         static bool ParentIsFile(string rel, Dictionary<string, FileMeta> files)

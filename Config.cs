@@ -14,6 +14,8 @@ namespace FolderDiffCopy
     internal sealed class Config
     {
         public const string FileName = "configuration.conf";
+        public const string AppSection = "folder-difference-copy";
+        public const string DaylightSavingKey = "daylight_saving_fix";
         const string AppDataFolder = "Folder Difference Copy";
 
         const string Template =
@@ -28,7 +30,13 @@ namespace FolderDiffCopy
             "# The folder each Browse button opens at. The app updates these\r\n" +
             "# lines itself after you pick a folder.\r\n" +
             "a =\r\n" +
-            "b =\r\n";
+            "b =\r\n" +
+            "\r\n" +
+            "[folder-difference-copy]\r\n" +
+            "# Daylight Savings error fix. When true, same-size files whose\r\n" +
+            "# times are exactly one hour apart are left alone (camera clock /\r\n" +
+            "# daylight saving changes).\r\n" +
+            "daylight_saving_fix = true\r\n";
 
         readonly string mainPath;
         readonly string fallbackPath;

@@ -7,6 +7,7 @@ A built copy is [`Folder.Difference.Copy.exe`](https://github.com/oiuy-retro/fol
 ## What it does
 
 - One-way, A to B (default): copies files from A that are missing in B, and replaces a same-named file in B when its size or modified time differs. Files that exist only in B stay.
+- **Daylight Savings error fix** (on by default): a same-sized file is left alone when its modified times are within 2 seconds, or within 2 seconds of one hour. Camera clocks and daylight saving changes often shift the time by one hour. Turn the option off to copy those files. A different size is still copied, and so is a gap of more than 2 seconds past an hour.
 - **Copy both ways:** missing files go A → B and B → A. Same-named files that differ use the newer write time; A wins a tie. Empty folders are created on both sides.
 - Refuses folders that contain each other.
 - Parallelization sets how many files are copied at the same time, from 1 to 32.
@@ -49,9 +50,12 @@ The app keeps its settings in `configuration.conf`, a plain text file next to th
 [folders]
 a = D:\Photos
 b = E:\Backup\Photos
+
+[folder-difference-copy]
+daylight_saving_fix = true
 ```
 
-`[folders]` holds the folder each Browse button opens at. After you pick a folder, the app updates only that line and leaves the rest of the file alone. If a saved folder no longer exists, Browse opens at the nearest folder above it that still exists. If the exe's folder can't be written to, for example under Program Files, the app saves to `%APPDATA%\Folder Difference Copy\configuration.conf` instead, and values there win over the ones next to the exe. Relative paths start from the exe's folder, and `%VARS%` such as `%USERPROFILE%` are expanded.
+`[folders]` holds the folder each Browse button opens at. After you pick a folder, the app updates only that line and leaves the rest of the file alone. `[folder-difference-copy]` holds the **Daylight Savings error fix** checkbox. The app updates only that line when you change the checkbox. If a saved folder no longer exists, Browse opens at the nearest folder above it that still exists. If the exe's folder can't be written to, for example under Program Files, the app saves to `%APPDATA%\Folder Difference Copy\configuration.conf` instead, and values there win over the ones next to the exe. Relative paths start from the exe's folder, and `%VARS%` such as `%USERPROFILE%` are expanded.
 
 ## Build
 
