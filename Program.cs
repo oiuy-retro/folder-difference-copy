@@ -61,6 +61,7 @@ namespace FolderDiffCopy
                 failed += Check(log, "compare and copy", delegate { TestCompareAndCopy(root); });
                 failed += Check(log, "changed file is replaced", delegate { TestChanged(root); });
                 failed += Check(log, "time tolerance", delegate { TestTimeTolerance(root); });
+                failed += Check(log, "one hour clock", delegate { TestHourClock(root); });
                 failed += Check(log, "readonly destination", delegate { TestReadOnly(root); });
                 failed += Check(log, "empty folders and extra files", delegate { TestExtras(root); });
                 failed += Check(log, "progress stays accurate", delegate { TestProgress(root); });
@@ -203,6 +204,47 @@ namespace FolderDiffCopy
             CompareResult result = Diff.Compare(a, b, new ScanStatus());
             Need(result.Jobs.Count == 1, "tolerance jobs " + result.Jobs.Count);
             Need(result.Jobs[0].RelativePath == "far.txt", result.Jobs[0].RelativePath);
+        }
+
+        static void TestHourClock(string root)
+        {
+            string a = Path.Combine(root, "hour-a");
+            string b = Path.Combine(root, "hour-b");
+            Write(Path.Combine(a, "hour.txt"), "same");
+            Write(Path.Combine(b, "hour.txt"), "same");
+            Write(Path.Combine(a, "later.txt"), "same");
+            Write(Path.Combine(b, "later.txt"), "same");
+            Write(Path.Combine(a, "near.txt"), "same");
+            Write(Path.Combine(b, "near.txt"), "same");
+            Write(Path.Combine(a, "early.txt"), "same");
+            Write(Path.Combine(b, "early.txt"), "same");
+            Write(Path.Combine(a, "far.txt"), "same");
+            Write(Path.Combine(b, "far.txt"), "same");
+            Write(Path.Combine(a, "sized.txt"), "longer");
+            Write(Path.Combine(b, "sized.txt"), "x");
+            DateTime t = new DateTime(2025, 12, 24, 15, 4, 59, DateTimeKind.Utc);
+            File.SetLastWriteTimeUtc(Path.Combine(a, "hour.txt"), t);
+            File.SetLastWriteTimeUtc(Path.Combine(b, "hour.txt"), t.AddHours(-1));
+            File.SetLastWriteTimeUtc(Path.Combine(a, "later.txt"), t);
+            File.SetLastWriteTimeUtc(Path.Combine(b, "later.txt"), t.AddHours(1));
+            File.SetLastWriteTimeUtc(Path.Combine(a, "near.txt"), t);
+            File.SetLastWriteTimeUtc(Path.Combine(b, "near.txt"), t.AddHours(-1).AddSeconds(-2));
+            File.SetLastWriteTimeUtc(Path.Combine(a, "early.txt"), t);
+            File.SetLastWriteTimeUtc(Path.Combine(b, "early.txt"), t.AddHours(-1).AddSeconds(2));
+            File.SetLastWriteTimeUtc(Path.Combine(a, "far.txt"), t);
+            File.SetLastWriteTimeUtc(Path.Combine(b, "far.txt"), t.AddHours(-1).AddSeconds(-3));
+            File.SetLastWriteTimeUtc(Path.Combine(a, "sized.txt"), t);
+            File.SetLastWriteTimeUtc(Path.Combine(b, "sized.txt"), t.AddHours(-1));
+            CompareResult result = Diff.Compare(a, b, new ScanStatus());
+            Need(result.Unchanged == 4, "hour unchanged " + result.Unchanged);
+            Need(result.Jobs.Count == 2, "hour jobs " + result.Jobs.Count);
+            Need(result.Jobs[0].RelativePath == "far.txt", result.Jobs[0].RelativePath);
+            Need(result.Jobs[1].RelativePath == "sized.txt", result.Jobs[1].RelativePath);
+            CompareResult both = Diff.Compare(a, b, new ScanStatus(), true, true);
+            Need(both.Unchanged == 4, "both ways unchanged " + both.Unchanged);
+            Need(both.Jobs.Count == 2, "both ways jobs " + both.Jobs.Count);
+            Need(both.Jobs[0].RelativePath == "far.txt", both.Jobs[0].RelativePath);
+            Need(both.Jobs[1].RelativePath == "sized.txt", both.Jobs[1].RelativePath);
         }
 
         static void TestReadOnly(string root)

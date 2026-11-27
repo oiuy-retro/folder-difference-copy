@@ -7,6 +7,7 @@ A built copy is [`Folder.Difference.Copy.exe`](https://github.com/oiuy-retro/fol
 ## What it does
 
 - One-way, A to B (default): copies files from A that are missing in B, and replaces a same-named file in B when its size or modified time differs. Files that exist only in B stay.
+- A same-sized file is left alone when its modified times are within 2 seconds, or within 2 seconds of one hour. Shared folders often shift the clock by one hour. A different size is still copied, and so is a gap of more than 2 seconds past an hour.
 - **Copy both ways:** missing files go A → B and B → A. Same-named files that differ use the newer write time; A wins a tie. Empty folders are created on both sides.
 - Refuses folders that contain each other.
 - Parallelization sets how many files are copied at the same time, from 1 to 32.

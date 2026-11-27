@@ -183,6 +183,7 @@ namespace FolderDiffCopy
     internal static class Diff
     {
         const long TwoSeconds = 20000000L;
+        const long OneHour = 36000000000L;
 
         public static CompareResult Compare(string folderA, string folderB, ScanStatus status)
         {
@@ -413,7 +414,11 @@ namespace FolderDiffCopy
         {
             long delta = a > b ? a - b : b - a;
             // FAT stores modified times in 2 second steps. Closer than that counts as the same time.
-            return delta > TwoSeconds;
+            if (delta <= TwoSeconds) return false;
+            // Shared folders shift a modified time by one hour. The caller already required
+            // the same size. Within 2 seconds of that hour is still the same file.
+            long pastHour = delta > OneHour ? delta - OneHour : OneHour - delta;
+            return pastHour > TwoSeconds;
         }
 
         static bool ParentIsFile(string rel, Dictionary<string, FileMeta> files)
